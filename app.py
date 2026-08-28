@@ -8,27 +8,31 @@ from modules.vin.nhtsa_vin_decoder import NHTSAVinDecoder
 from modules.vin.wmi_database import WMIDatabase
 from modules.dtc.dtc_database import DTCDatabase
 
+# -------------------------------------------------------------------
+# FastAPI App with auto-enabled inputs for Swagger Docs
+# -------------------------------------------------------------------
 app = FastAPI(
     title="NHTSA & Automotive Diagnostics API",
     description="Unified REST API microservice for VIN decoding, safety recalls, and OBD-II DTC diagnostic trouble code lookups.",
     version="1.1.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    swagger_ui_parameters={"tryItOutEnabled": True}  # Auto-enables inputs
 )
 
 # -------------------------------------------------------------------
-# Engine Initializations
+# Database Path & Helper
 # -------------------------------------------------------------------
-vin_decoder = NHTSAVinDecoder()
-
-# Resolve absolute path to dtc_codes.db inside modules/dtc/
 current_dir = os.path.dirname(os.path.abspath(__file__))
 dtc_db_path = os.path.join(current_dir, "modules", "dtc", "dtc_codes.db")
 
-if os.path.exists(dtc_db_path):
-    dtc_db = DTCDatabase(dtc_db_path)
-else:
-    dtc_db = DTCDatabase()
+def get_dtc_instance() -> DTCDatabase:
+    """Creates a thread-safe database connection instance for the request."""
+    if os.path.exists(dtc_db_path):
+        return DTCDatabase(dtc_db_path)
+    return DTCDatabase()
+
+vin_decoder = NHTSAVinDecoder()
 
 # -------------------------------------------------------------------
 # Health Checks
@@ -51,7 +55,6 @@ def decode_vin(vin: str):
     """
     Decodes a 17-character VIN using the live NHTSA vPIC API with offline WMI fallback.
     Returns core vehicle metadata and all available technical specifications.
-    *(Note: Paint colors and dealer options are not encoded in standard VINs).*
     """
     vin = vin.strip().upper()
     if len(vin) != 17:
@@ -60,7 +63,6 @@ def decode_vin(vin: str):
     try:
         vehicle = vin_decoder.decode(vin)
         
-        # Extract all available non-null attributes returned by NHTSA
         specs: Dict[str, Any] = {}
         for attr, val in vars(vehicle).items():
             if val is not None and attr not in ["vin", "year", "make", "model", "trim", "body_class"]:
@@ -77,7 +79,6 @@ def decode_vin(vin: str):
             "source": "nhtsa_vpic"
         }
     except Exception as e:
-        # Offline WMI Fallback
         manufacturer = WMIDatabase.get_manufacturer(vin)
         year = WMIDatabase.get_year(vin)
         return {
@@ -106,7 +107,6 @@ def get_recalls(
     Queries official NHTSA safety recall campaigns. 
     You can query by providing either a **VIN** OR by providing **make, model, and year**.
     """
-    # If VIN is provided, decode it first to get Year, Make, Model
     if vin:
         vin = vin.strip().upper()
         if len(vin) != 17:
@@ -128,7 +128,6 @@ def get_recalls(
             detail="You must provide either 'vin' OR all three of ('make', 'model', 'year')."
         )
 
-    # Query NHTSA Recalls API
     url = f"https://api.nhtsa.gov/recalls/recallsByVehicle?make={make}&model={model}&modelYear={year}"
     try:
         response = requests.get(url, timeout=10)
@@ -161,7 +160,7 @@ def get_recalls(
         raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
 
 # -------------------------------------------------------------------
-# 3. OBD-II DTC Lookup Endpoint
+# 3. OBD-II DTC Lookup Endpoint (Thread-Safe)
 # -------------------------------------------------------------------
 @app.get("/api/dtc/{code}", tags=["OBD-II Diagnostics"])
 def get_dtc(
@@ -174,13 +173,19 @@ def get_dtc(
     """
     code = code.strip().upper()
     try:
-        # Query manufacturer specific or fallback to generic
+        # Create thread-safe request instance
+        db = get_dtc_instance()
+        
         dtc_info = None
         if manufacturer:
-            dtc_info = dtc_db.get_dtc(code, manufacturer.strip().upper())
+            dtc_info = db.get_dtc(code, manufacturer.strip().upper())
             
         if not dtc_info:
-            dtc_info = dtc_db.get_dtc(code)
+            dtc_info = db.get_dtc(code)
+
+        # Close connection cleanly if method exists
+        if hasattr(db, "close"):
+            db.close()
 
         if not dtc_info:
             raise HTTPException(status_code=404, detail=f"DTC code '{code}' not found in database.")
