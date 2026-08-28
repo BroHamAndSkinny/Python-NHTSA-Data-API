@@ -1,54 +1,71 @@
 import os
 import requests
 from fastapi import FastAPI, HTTPException, Query
-from typing import Optional
+from typing import Optional, Dict, Any
 
-# Local module imports matching your `modules/` folder layout
+# Local module imports
 from modules.vin.nhtsa_vin_decoder import NHTSAVinDecoder
 from modules.vin.wmi_database import WMIDatabase
 from modules.dtc.dtc_database import DTCDatabase
 
 app = FastAPI(
     title="NHTSA & Automotive Diagnostics API",
-    description="Unified API for VIN decoding, safety recalls, and OBD-II DTC lookups.",
-    version="1.0.0"
+    description="Unified REST API microservice for VIN decoding, safety recalls, and OBD-II DTC diagnostic trouble code lookups.",
+    version="1.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# 1. Initialize VIN Decoder
+# -------------------------------------------------------------------
+# Engine Initializations
+# -------------------------------------------------------------------
 vin_decoder = NHTSAVinDecoder()
 
-# 2. Initialize DTC Database with explicit absolute path
+# Resolve absolute path to dtc_codes.db inside modules/dtc/
 current_dir = os.path.dirname(os.path.abspath(__file__))
 dtc_db_path = os.path.join(current_dir, "modules", "dtc", "dtc_codes.db")
 
 if os.path.exists(dtc_db_path):
     dtc_db = DTCDatabase(dtc_db_path)
 else:
-    # Fallback to default constructor if the file was placed in another default directory
     dtc_db = DTCDatabase()
 
 # -------------------------------------------------------------------
-# Health Probes
+# Health Checks
 # -------------------------------------------------------------------
-@app.get("/")
+@app.get("/", tags=["System Probes"])
 def root_status():
+    """Basic service identifier probe."""
     return {"status": "ok", "service": "nhtsa-diagnostics-api"}
 
-@app.get("/health")
+@app.get("/health", tags=["System Probes"])
 def health_check():
+    """Health status probe for reverse proxies and orchestrators."""
     return {"status": "healthy"}
 
 # -------------------------------------------------------------------
 # 1. VIN Decoder Endpoint
 # -------------------------------------------------------------------
-@app.get("/api/decode/{vin}")
+@app.get("/api/decode/{vin}", tags=["VIN Decoder"])
 def decode_vin(vin: str):
+    """
+    Decodes a 17-character VIN using the live NHTSA vPIC API with offline WMI fallback.
+    Returns core vehicle metadata and all available technical specifications.
+    *(Note: Paint colors and dealer options are not encoded in standard VINs).*
+    """
     vin = vin.strip().upper()
     if len(vin) != 17:
-        raise HTTPException(status_code=400, detail="Invalid VIN length. Must be 17 characters.")
+        raise HTTPException(status_code=400, detail="Invalid VIN length. VIN must be exactly 17 characters.")
     
     try:
         vehicle = vin_decoder.decode(vin)
+        
+        # Extract all available non-null attributes returned by NHTSA
+        specs: Dict[str, Any] = {}
+        for attr, val in vars(vehicle).items():
+            if val is not None and attr not in ["vin", "year", "make", "model", "trim", "body_class"]:
+                specs[attr] = val
+
         return {
             "vin": vin,
             "year": getattr(vehicle, "year", None),
@@ -56,33 +73,67 @@ def decode_vin(vin: str):
             "model": getattr(vehicle, "model", None),
             "trim": getattr(vehicle, "trim", None),
             "body_class": getattr(vehicle, "body_class", None),
+            "specifications": specs,
             "source": "nhtsa_vpic"
         }
     except Exception as e:
+        # Offline WMI Fallback
         manufacturer = WMIDatabase.get_manufacturer(vin)
         year = WMIDatabase.get_year(vin)
         return {
             "vin": vin,
             "year": year,
             "make": manufacturer,
+            "model": None,
+            "trim": None,
+            "body_class": None,
+            "specifications": {},
             "source": "offline_fallback",
             "warning": str(e)
         }
 
 # -------------------------------------------------------------------
-# 2. Safety Recalls Endpoint
+# 2. Safety Recalls Endpoint (Supports VIN OR Make/Model/Year)
 # -------------------------------------------------------------------
-@app.get("/api/recalls")
+@app.get("/api/recalls", tags=["Safety Recalls"])
 def get_recalls(
-    make: str = Query(..., description="Vehicle Make (e.g., Honda, Tesla)"),
-    model: str = Query(..., description="Vehicle Model (e.g., Accord, Model S)"),
-    year: int = Query(..., description="Model Year (e.g., 2014, 2023)")
+    vin: Optional[str] = Query(None, description="17-character VIN (auto-resolves Year, Make, Model)"),
+    make: Optional[str] = Query(None, description="Vehicle Make (e.g., Tesla, Honda)"),
+    model: Optional[str] = Query(None, description="Vehicle Model (e.g., Model S, Accord)"),
+    year: Optional[int] = Query(None, description="Model Year (e.g., 2014, 2023)")
 ):
-    url = f"https://api.nhtsa.gov/recalls/recallsByVin?make={make}&model={model}&modelYear={year}"
+    """
+    Queries official NHTSA safety recall campaigns. 
+    You can query by providing either a **VIN** OR by providing **make, model, and year**.
+    """
+    # If VIN is provided, decode it first to get Year, Make, Model
+    if vin:
+        vin = vin.strip().upper()
+        if len(vin) != 17:
+            raise HTTPException(status_code=400, detail="Invalid VIN length. Must be 17 characters.")
+        try:
+            vehicle = vin_decoder.decode(vin)
+            make = getattr(vehicle, "make", None)
+            model = getattr(vehicle, "model", None)
+            year = getattr(vehicle, "year", None)
+            
+            if not make or not model or not year:
+                raise HTTPException(status_code=422, detail="Could not resolve Make, Model, or Year from this VIN.")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Failed to resolve VIN for recall check: {str(e)}")
+
+    if not make or not model or not year:
+        raise HTTPException(
+            status_code=400, 
+            detail="You must provide either 'vin' OR all three of ('make', 'model', 'year')."
+        )
+
+    # Query NHTSA Recalls API
+    url = f"https://api.nhtsa.gov/recalls/recallsByVehicle?make={make}&model={model}&modelYear={year}"
     try:
         response = requests.get(url, timeout=10)
         if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="NHTSA Recall API error.")
+            raise HTTPException(status_code=response.status_code, detail="NHTSA Recalls API request failed.")
         
         data = response.json()
         results = data.get("results", [])
@@ -99,31 +150,48 @@ def get_recalls(
             })
             
         return {
-            "make": make.upper(),
-            "model": model.title(),
-            "year": year,
+            "query_vin": vin if vin else None,
+            "make": str(make).upper(),
+            "model": str(model).title(),
+            "year": int(year),
             "total_recalls": len(recalls),
             "recalls": recalls
         }
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Failed to connect to NHTSA Recalls API: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
 
 # -------------------------------------------------------------------
 # 3. OBD-II DTC Lookup Endpoint
 # -------------------------------------------------------------------
-@app.get("/api/dtc/{code}")
-def get_dtc(code: str, manufacturer: Optional[str] = None):
+@app.get("/api/dtc/{code}", tags=["OBD-II Diagnostics"])
+def get_dtc(
+    code: str, 
+    manufacturer: Optional[str] = Query(None, description="Optional OEM filter (e.g. FORD, GM, HONDA)")
+):
+    """
+    Looks up OBD-II Diagnostic Trouble Code definitions (Powertrain, Chassis, Body, Network).
+    Queries generic SAE J2012 definitions or manufacturer-specific codes offline.
+    """
     code = code.strip().upper()
     try:
-        dtc_info = dtc_db.get_dtc(code, manufacturer)
+        # Query manufacturer specific or fallback to generic
+        dtc_info = None
+        if manufacturer:
+            dtc_info = dtc_db.get_dtc(code, manufacturer.strip().upper())
+            
         if not dtc_info:
-            raise HTTPException(status_code=404, detail=f"DTC code '{code}' not found.")
+            dtc_info = dtc_db.get_dtc(code)
+
+        if not dtc_info:
+            raise HTTPException(status_code=404, detail=f"DTC code '{code}' not found in database.")
         
         return {
             "code": getattr(dtc_info, "code", code),
-            "type": getattr(dtc_info, "type_name", None) or getattr(dtc_info, "category", None),
+            "type": getattr(dtc_info, "type_name", None) or getattr(dtc_info, "category", "Powertrain"),
             "description": getattr(dtc_info, "description", None),
             "manufacturer": getattr(dtc_info, "manufacturer", manufacturer or "GENERIC")
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"DTC Database query error: {str(e)}")
