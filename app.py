@@ -1,6 +1,8 @@
 import os
 import requests
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
 from typing import Optional, Dict, Any
 
 # Local module imports
@@ -8,17 +10,28 @@ from modules.vin.nhtsa_vin_decoder import NHTSAVinDecoder
 from modules.vin.wmi_database import WMIDatabase
 from modules.dtc.dtc_database import DTCDatabase
 
-# -------------------------------------------------------------------
-# FastAPI App with auto-enabled inputs for Swagger Docs
-# -------------------------------------------------------------------
+# Disable default /docs so we can render our custom styled Swagger UI
 app = FastAPI(
     title="NHTSA & Automotive Diagnostics API",
     description="Unified REST API microservice for VIN decoding, safety recalls, and OBD-II DTC diagnostic trouble code lookups.",
     version="1.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    swagger_ui_parameters={"tryItOutEnabled": True}  # Auto-enables inputs
+    docs_url=None,   # Managed via custom route below
+    redoc_url="/redoc"
 )
+
+# -------------------------------------------------------------------
+# Custom Swagger UI Route (Hides "Try it out" / "Cancel" completely)
+# -------------------------------------------------------------------
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui() -> HTMLResponse:
+    html = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Interactive Docs",
+        swagger_ui_parameters={"tryItOutEnabled": True}
+    )
+    # Inject CSS to hide the Try it out / Cancel container permanently
+    custom_css = "<style>.try-out { display: none !important; }</style></head>"
+    return HTMLResponse(content=html.body.decode("utf-8").replace("</head>", custom_css))
 
 # -------------------------------------------------------------------
 # Database Path & Helper
@@ -173,7 +186,6 @@ def get_dtc(
     """
     code = code.strip().upper()
     try:
-        # Create thread-safe request instance
         db = get_dtc_instance()
         
         dtc_info = None
@@ -183,7 +195,6 @@ def get_dtc(
         if not dtc_info:
             dtc_info = db.get_dtc(code)
 
-        # Close connection cleanly if method exists
         if hasattr(db, "close"):
             db.close()
 
