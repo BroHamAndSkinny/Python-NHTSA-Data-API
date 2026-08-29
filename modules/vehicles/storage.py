@@ -21,9 +21,8 @@ from .years import format_years, parse_years
 # clients/python/open_vehicle_db/storage.py -> the repo root is four levels up.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# The data is read relative to the checkout. The environment variable is here for tests and for
-# anyone vendoring the CSVs somewhere else.
-DATA_DIR = Path(os.environ.get("OPEN_VEHICLE_DB_DATA") or REPO_ROOT / "data")
+# Point directly to the adjacent 'data' folder inside modules/vehicles/
+DATA_DIR = Path(os.environ.get("OPEN_VEHICLE_DB_DATA") or Path(__file__).resolve().parent / "data")
 
 STATS_JSON = "stats.json"
 
