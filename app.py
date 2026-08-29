@@ -24,11 +24,11 @@ Unified REST API microservice for VIN decoding, safety recalls, and OBD-II DTC d
 * <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
 * <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
 * <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
-* <a href="/api/recalls?campaign_number=14V029000" target="_blank"><code>/api/recalls?campaign_number=14V029000</code></a>
+* <a href="/api/recalls?campaign_number=17V260000" target="_blank"><code>/api/recalls?campaign_number=17V260000</code></a>
 * <a href="/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01" target="_blank"><code>/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01</code></a>
 * <a href="/api/dtc/P0300" target="_blank"><code>/api/dtc/P0300</code></a>
     """,
-    version="1.3.0",
+    version="1.4.0",
     docs_url=None,
     redoc_url="/redoc"
 )
@@ -88,11 +88,26 @@ def parse_nhtsa_date(date_str: Optional[str]) -> Optional[str]:
 
     return date_str
 
-def format_recall_item(r: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalizes raw NHTSA JSON record into a standardized dictionary."""
+def format_recall_item(r: Dict[str, Any], fallback_make: Optional[str] = None, fallback_model: Optional[str] = None, fallback_year: Optional[int] = None) -> Dict[str, Any]:
+    """Normalizes raw NHTSA JSON record into a standardized dictionary with Year/Make/Model."""
     raw_date = r.get("ReportReceivedDate") or r.get("reportReceivedDate")
+    
+    raw_make = r.get("Make") or r.get("make") or fallback_make
+    raw_model = r.get("Model") or r.get("model") or fallback_model
+    raw_year = r.get("ModelYear") or r.get("modelYear") or fallback_year
+
+    parsed_year = None
+    if raw_year is not None:
+        try:
+            parsed_year = int(str(raw_year).strip())
+        except (ValueError, TypeError):
+            parsed_year = raw_year
+
     return {
         "nhtsa_campaign_number": r.get("NHTSACampaignNumber") or r.get("nhtsaCampaignNumber"),
+        "make": str(raw_make).upper() if raw_make else None,
+        "model": str(raw_model).title() if raw_model else None,
+        "year": parsed_year,
         "recall_date": parse_nhtsa_date(raw_date),
         "component": r.get("Component") or r.get("component"),
         "summary": r.get("Summary") or r.get("summary"),
@@ -118,7 +133,7 @@ def fetch_vehicle_recalls(make: str, model: str, year: int) -> List[Dict[str, An
         raise HTTPException(status_code=response.status_code, detail="NHTSA Recalls API request failed.")
     
     raw_results = response.json().get("results", [])
-    formatted = [format_recall_item(r) for r in raw_results]
+    formatted = [format_recall_item(r, fallback_make=make, fallback_model=model, fallback_year=year) for r in raw_results]
     
     RECALL_CACHE[cache_key] = {"time": now, "data": formatted}
     return formatted
@@ -288,7 +303,7 @@ def get_recalls(
     make: Optional[str] = Query(None, description="Vehicle Make (e.g., Tesla, Honda)"),
     model: Optional[str] = Query(None, description="Vehicle Model (e.g., Model S, Accord)"),
     year: Optional[int] = Query(None, description="Model Year (e.g., 2014, 2023)"),
-    campaign_number: Optional[str] = Query(None, description="NHTSA Campaign Number (e.g., 14V029000)"),
+    campaign_number: Optional[str] = Query(None, description="NHTSA Campaign Number (e.g., 17V260000)"),
     since_date: Optional[str] = Query(None, description="Filter recalls on/after this date (YYYY-MM-DD)"),
     only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only")
 ):
@@ -298,7 +313,7 @@ def get_recalls(
     Live examples:
     * Query by VIN: <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
     * Query by Make/Model/Year: <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
-    * Query by Campaign Number: <a href="/api/recalls?campaign_number=14V029000" target="_blank"><code>/api/recalls?campaign_number=14V029000</code></a>
+    * Query by Campaign Number: <a href="/api/recalls?campaign_number=17V260000" target="_blank"><code>/api/recalls?campaign_number=17V260000</code></a>
     * Query with date filter: <a href="/api/recalls?make=tesla&model=model%20s&year=2014&since_date=2020-01-01" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014&since_date=2020-01-01</code></a>
     """
     recalls: List[Dict[str, Any]] = []
