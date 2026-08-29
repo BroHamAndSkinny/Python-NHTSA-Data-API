@@ -1,9 +1,13 @@
 import os
+import re
+import time
 import requests
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
-from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
 
 # Local module imports
 from modules.vin.nhtsa_vin_decoder import NHTSAVinDecoder
@@ -14,10 +18,16 @@ from modules.dtc.dtc_database import DTCDatabase
 app = FastAPI(
     title="NHTSA & Automotive Diagnostics API",
     description="Unified REST API microservice for VIN decoding, safety recalls, and OBD-II DTC diagnostic trouble code lookups.",
-    version="1.1.0",
+    version="1.2.0",
     docs_url=None,   # Managed via custom route below
     redoc_url="/redoc"
 )
+
+# -------------------------------------------------------------------
+# In-Memory Recall Cache Config
+# -------------------------------------------------------------------
+RECALL_CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL_SECONDS = 86400  # 24 Hours
 
 # -------------------------------------------------------------------
 # Custom Swagger UI Route (Hides "Try it out" / "Cancel" completely)
@@ -46,6 +56,72 @@ def get_dtc_instance() -> DTCDatabase:
     return DTCDatabase()
 
 vin_decoder = NHTSAVinDecoder()
+
+def parse_nhtsa_date(date_str: Optional[str]) -> Optional[str]:
+    """Normalizes NHTSA date strings (e.g. '15/03/2024' or epoch) to YYYY-MM-DD."""
+    if not date_str:
+        return None
+    date_str = str(date_str).strip()
+    
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+            
+    # Format: /Date(1584230400000)/
+    epoch_match = re.search(r"\d+", date_str)
+    if epoch_match and len(epoch_match.group()) >= 10:
+        try:
+            ts = int(epoch_match.group()[:10])
+            return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    return date_str
+
+def format_recall_item(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalizes raw NHTSA JSON record into a standardized dictionary."""
+    raw_date = r.get("ReportReceivedDate") or r.get("reportReceivedDate")
+    return {
+        "nhtsa_campaign_number": r.get("NHTSACampaignNumber") or r.get("nhtsaCampaignNumber"),
+        "recall_date": parse_nhtsa_date(raw_date),
+        "component": r.get("Component") or r.get("component"),
+        "summary": r.get("Summary") or r.get("summary"),
+        "consequence": r.get("Conequence") or r.get("consequence"),
+        "remedy": r.get("Remedy") or r.get("remedy"),
+        "notes": r.get("Notes") or r.get("notes"),
+        "park_it": bool(r.get("parkIt") or r.get("ParkIt") or False),
+        "park_outside": bool(r.get("parkOutSide") or r.get("ParkOutside") or r.get("parkOutside") or False),
+        "over_the_air_update": bool(r.get("overTheAirUpdate") or r.get("OverTheAirUpdate") or False)
+    }
+
+def fetch_vehicle_recalls(make: str, model: str, year: int) -> List[Dict[str, Any]]:
+    """Fetches and caches recalls for a specific make/model/year."""
+    cache_key = f"{make.strip().upper()}|{model.strip().lower()}|{year}"
+    now = time.time()
+    
+    if cache_key in RECALL_CACHE and (now - RECALL_CACHE[cache_key]["time"]) < CACHE_TTL_SECONDS:
+        return RECALL_CACHE[cache_key]["data"]
+
+    url = f"https://api.nhtsa.gov/recalls/recallsByVehicle?make={make}&model={model}&modelYear={year}"
+    response = requests.get(url, timeout=10)
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail="NHTSA Recalls API request failed.")
+    
+    raw_results = response.json().get("results", [])
+    formatted = [format_recall_item(r) for r in raw_results]
+    
+    RECALL_CACHE[cache_key] = {"time": now, "data": formatted}
+    return formatted
+
+# -------------------------------------------------------------------
+# Pydantic Schemas for Batch Processing
+# -------------------------------------------------------------------
+class BatchRecallRequest(BaseModel):
+    vins: List[str] = Field(..., description="List of 17-character VINs to check", example=["5YJSA1E26EF000001", "1HGCM82633A004352"])
+    since_date: Optional[str] = Field(None, description="Filter recalls on/after date (YYYY-MM-DD)", example="2020-01-01")
+    only_critical: bool = Field(False, description="Include only Park It / Park Outside critical safety recalls")
 
 # -------------------------------------------------------------------
 # Health Checks
@@ -107,19 +183,43 @@ def decode_vin(vin: str):
         }
 
 # -------------------------------------------------------------------
-# 2. Safety Recalls Endpoint (Supports VIN OR Make/Model/Year)
+# 2. Safety Recalls Endpoints (Single & Batch)
 # -------------------------------------------------------------------
 @app.get("/api/recalls", tags=["Safety Recalls"])
 def get_recalls(
     vin: Optional[str] = Query(None, description="17-character VIN (auto-resolves Year, Make, Model)"),
     make: Optional[str] = Query(None, description="Vehicle Make (e.g., Tesla, Honda)"),
     model: Optional[str] = Query(None, description="Vehicle Model (e.g., Model S, Accord)"),
-    year: Optional[int] = Query(None, description="Model Year (e.g., 2014, 2023)")
+    year: Optional[int] = Query(None, description="Model Year (e.g., 2014, 2023)"),
+    campaign_number: Optional[str] = Query(None, description="NHTSA Campaign Number (e.g., 14V029000)"),
+    since_date: Optional[str] = Query(None, description="Filter recalls on/after this date (YYYY-MM-DD)"),
+    only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only")
 ):
     """
-    Queries official NHTSA safety recall campaigns. 
-    You can query by providing either a **VIN** OR by providing **make, model, and year**.
+    Queries official NHTSA safety recalls by **Campaign Number**, **VIN**, or **Make/Model/Year**.
+    Includes safety flags (`park_it`, `park_outside`, `over_the_air_update`).
     """
+    recalls: List[Dict[str, Any]] = []
+
+    # Query by Campaign Number
+    if campaign_number:
+        c_num = campaign_number.strip().upper()
+        url = f"https://api.nhtsa.gov/recalls/campaignNumber?campaignNumber={c_num}"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail="NHTSA Campaign API request failed.")
+            raw_results = response.json().get("results", [])
+            recalls = [format_recall_item(r) for r in raw_results]
+            return {
+                "campaign_number": c_num,
+                "total_recalls": len(recalls),
+                "recalls": recalls
+            }
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
+
+    # Resolve Make/Model/Year if VIN provided
     if vin:
         vin = vin.strip().upper()
         if len(vin) != 17:
@@ -131,36 +231,28 @@ def get_recalls(
             year = getattr(vehicle, "year", None)
             
             if not make or not model or not year:
-                raise HTTPException(status_code=422, detail="Could not resolve Make, Model, or Year from this VIN.")
+                raise HTTPException(status_code=422, detail="Could not resolve Make, Model, or Year from VIN.")
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to resolve VIN for recall check: {str(e)}")
 
     if not make or not model or not year:
         raise HTTPException(
             status_code=400, 
-            detail="You must provide either 'vin' OR all three of ('make', 'model', 'year')."
+            detail="Provide 'campaign_number', 'vin', OR all three of ('make', 'model', 'year')."
         )
 
-    url = f"https://api.nhtsa.gov/recalls/recallsByVehicle?make={make}&model={model}&modelYear={year}"
+    # Fetch from cached lookup helper
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="NHTSA Recalls API request failed.")
+        raw_recalls = fetch_vehicle_recalls(make=make, model=model, year=int(year))
         
-        data = response.json()
-        results = data.get("results", [])
-        
-        recalls = []
-        for r in results:
-            recalls.append({
-                "nhtsa_campaign_number": r.get("NHTSACampaignNumber"),
-                "component": r.get("Component"),
-                "summary": r.get("Summary"),
-                "consequence": r.get("Conequence"),
-                "remedy": r.get("Remedy"),
-                "notes": r.get("Notes")
-            })
-            
+        # Apply filters
+        for r in raw_recalls:
+            if since_date and r.get("recall_date") and r["recall_date"] < since_date:
+                continue
+            if only_critical and not (r.get("park_it") or r.get("park_outside")):
+                continue
+            recalls.append(r)
+
         return {
             "query_vin": vin if vin else None,
             "make": str(make).upper(),
@@ -171,6 +263,94 @@ def get_recalls(
         }
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
+
+
+@app.post("/api/recalls/batch", tags=["Safety Recalls"])
+def get_batch_recalls(payload: BatchRecallRequest):
+    """
+    Checks recalls across multiple fleet vehicles simultaneously.
+    - Decodes all VINs and groups matching Year/Make/Model combinations.
+    - Only issues **one API call per unique vehicle group** to protect rate limits.
+    - Uses in-memory caching for repeat lookups.
+    """
+    results: List[Dict[str, Any]] = []
+    
+    # 1. Decode and group VINs to find unique Make/Model/Year specs
+    decoded_vehicles: Dict[str, Dict[str, Any]] = {}
+    unique_groups: Dict[tuple, List[str]] = {}
+
+    for raw_vin in payload.vins:
+        v = raw_vin.strip().upper()
+        if len(v) != 17:
+            decoded_vehicles[v] = {"status": "error", "message": "Invalid VIN length"}
+            continue
+        try:
+            vehicle = vin_decoder.decode(v)
+            make = getattr(vehicle, "make", None)
+            model = getattr(vehicle, "model", None)
+            year = getattr(vehicle, "year", None)
+
+            if not make or not model or not year:
+                decoded_vehicles[v] = {"status": "error", "message": "Could not decode metadata from VIN"}
+                continue
+
+            group_key = (make.upper(), model.lower(), int(year))
+            decoded_vehicles[v] = {
+                "status": "success",
+                "make": make.upper(),
+                "model": model.title(),
+                "year": int(year),
+                "group_key": group_key
+            }
+            unique_groups.setdefault(group_key, []).append(v)
+        except Exception as e:
+            decoded_vehicles[v] = {"status": "error", "message": f"Decode error: {str(e)}"}
+
+    # 2. Fetch recalls only ONCE per unique vehicle group
+    group_recalls: Dict[tuple, List[Dict[str, Any]]] = {}
+    for (make, model, year) in unique_groups.keys():
+        try:
+            group_recalls[(make, model, year)] = fetch_vehicle_recalls(make, model, year)
+        except Exception:
+            group_recalls[(make, model, year)] = []
+
+    # 3. Assemble response preserving original query order and applying filters
+    for raw_vin in payload.vins:
+        v = raw_vin.strip().upper()
+        v_data = decoded_vehicles.get(v, {"status": "error", "message": "Unknown error"})
+
+        if v_data["status"] != "success":
+            results.append({
+                "vin": v,
+                "status": "error",
+                "message": v_data["message"]
+            })
+            continue
+
+        raw_list = group_recalls.get(v_data["group_key"], [])
+        filtered_recalls = []
+        for r in raw_list:
+            if payload.since_date and r.get("recall_date") and r["recall_date"] < payload.since_date:
+                continue
+            if payload.only_critical and not (r.get("park_it") or r.get("park_outside")):
+                continue
+            filtered_recalls.append(r)
+
+        results.append({
+            "vin": v,
+            "status": "success",
+            "make": v_data["make"],
+            "model": v_data["model"],
+            "year": v_data["year"],
+            "total_recalls": len(filtered_recalls),
+            "recalls": filtered_recalls
+        })
+
+    return {
+        "total_queried": len(payload.vins),
+        "unique_vehicle_types": len(unique_groups),
+        "results": results
+    }
 
 # -------------------------------------------------------------------
 # 3. OBD-II DTC Lookup Endpoint (Thread-Safe)
