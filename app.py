@@ -13,22 +13,27 @@ from typing import Optional, Dict, Any, List
 from modules.vin.nhtsa_vin_decoder import NHTSAVinDecoder
 from modules.vin.wmi_database import WMIDatabase
 from modules.dtc.dtc_database import DTCDatabase
+from modules.vehicles import client as vehicle_client
 
 # Disable default /docs to render our custom styled Swagger UI
 app = FastAPI(
     title="NHTSA & Automotive Diagnostics API",
     description="""
-Unified REST API microservice for VIN decoding, safety recalls, and OBD-II DTC diagnostic trouble code lookups.
+Unified REST API microservice for VIN decoding, safety recalls, OBD-II DTC diagnostic trouble code lookups, and vehicle dropdown lookups.
 
 ### Example Queries (Open in New Tab):
+* <a href="/api/vehicles/years" target="_blank"><code>/api/vehicles/years</code></a>
+* <a href="/api/vehicles/makes?year=2003" target="_blank"><code>/api/vehicles/makes?year=2003</code></a>
+* <a href="/api/vehicles/models?year=2003&make=Mazda" target="_blank"><code>/api/vehicles/models?year=2003&make=Mazda</code></a>
+* <a href="/api/vehicles/styles?year=2003&make=Mazda&model=Protege" target="_blank"><code>/api/vehicles/styles?year=2003&make=Mazda&model=Protege</code></a>
 * <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
 * <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
 * <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
-* <a href="/api/recalls?campaign_number=17V260000" target="_blank"><code>/api/recalls?campaign_number=17V260000</code></a>
+* <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
 * <a href="/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01" target="_blank"><code>/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01</code></a>
 * <a href="/api/dtc/P0300" target="_blank"><code>/api/dtc/P0300</code></a>
     """,
-    version="1.5.0",
+    version="1.7.0",
     docs_url=None,
     redoc_url="/redoc"
 )
@@ -89,9 +94,8 @@ def parse_nhtsa_date(date_str: Optional[str]) -> Optional[str]:
     return date_str
 
 def format_recall_item(r: Dict[str, Any], fallback_make: Optional[str] = None, fallback_model: Optional[str] = None, fallback_year: Optional[int] = None) -> Dict[str, Any]:
-    """Normalizes raw NHTSA JSON record into a standardized dictionary with Year/Make/Model."""
+    """Normalizes raw NHTSA JSON record into a standardized dictionary with Year/Make/Model and OEM action numbers."""
     raw_date = r.get("ReportReceivedDate") or r.get("reportReceivedDate")
-    
     raw_make = r.get("Make") or r.get("make") or fallback_make
     raw_model = r.get("Model") or r.get("model") or fallback_model
     raw_year = r.get("ModelYear") or r.get("modelYear") or fallback_year
@@ -105,6 +109,8 @@ def format_recall_item(r: Dict[str, Any], fallback_make: Optional[str] = None, f
 
     return {
         "nhtsa_campaign_number": r.get("NHTSACampaignNumber") or r.get("nhtsaCampaignNumber"),
+        "mfr_recall_number": r.get("ManufacturerCampaignNumber") or r.get("manufacturerCampaignNumber") or r.get("mfrRecallNumber"),
+        "tsa_action_number": r.get("TSAActionNumber") or r.get("tsaActionNumber"),
         "make": str(raw_make).upper() if raw_make else None,
         "model": str(raw_model).title() if raw_model else None,
         "year": parsed_year,
@@ -226,7 +232,7 @@ def run_batch_recall_logic(
     }
 
 # -------------------------------------------------------------------
-# Pydantic Schemas for Batch Processing
+# Pydantic Schemas
 # -------------------------------------------------------------------
 class BatchRecallRequest(BaseModel):
     vins: List[str] = Field(..., description="List of 17-character VINs", example=["5YJSA1E26EF000001", "1HGCM82633A004352"])
@@ -247,7 +253,88 @@ def health_check():
     return {"status": "healthy"}
 
 # -------------------------------------------------------------------
-# 1. VIN Decoder Endpoint
+# 1. Vehicle Dropdown Lookup Endpoints (Open Vehicle DB)
+# -------------------------------------------------------------------
+@app.get("/api/vehicles/years", tags=["Vehicle Dropdown Lookups"])
+def get_vehicle_years():
+    """
+    Returns supported model years (1981 through current/future model year).
+
+    Live example: <a href="/api/vehicles/years" target="_blank"><code>/api/vehicles/years</code></a>
+    """
+    current_year = datetime.now().year + 1
+    return {
+        "min_year": 1981,
+        "max_year": current_year,
+        "years": list(range(current_year, 1980, -1))
+    }
+
+@app.get("/api/vehicles/makes", tags=["Vehicle Dropdown Lookups"])
+def get_vehicle_makes(year: int = Query(..., description="Model Year (e.g. 2003, 2024)")):
+    """
+    Returns all makes available for a given model year.
+
+    Live example: <a href="/api/vehicles/makes?year=2003" target="_blank"><code>/api/vehicles/makes?year=2003</code></a>
+    """
+    try:
+        makes = vehicle_client.list_makes_for_year(year)
+        make_names = sorted([getattr(m, "make_name", str(m)) for m in makes])
+        return {
+            "year": year,
+            "total_makes": len(make_names),
+            "makes": make_names
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading vehicle makes: {str(e)}")
+
+@app.get("/api/vehicles/models", tags=["Vehicle Dropdown Lookups"])
+def get_vehicle_models(
+    year: int = Query(..., description="Model Year (e.g. 2003, 2024)"),
+    make: str = Query(..., description="Make Name (e.g. Mazda, Toyota, Tesla)")
+):
+    """
+    Returns all models for a specific year and make.
+
+    Live example: <a href="/api/vehicles/models?year=2003&make=Mazda" target="_blank"><code>/api/vehicles/models?year=2003&make=Mazda</code></a>
+    """
+    try:
+        models = vehicle_client.list_models_for_year_make(year=year, make_name=make.strip())
+        model_names = sorted([getattr(m, "model_name", str(m)) for m in models])
+        return {
+            "year": year,
+            "make": make,
+            "total_models": len(model_names),
+            "models": model_names
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading vehicle models: {str(e)}")
+
+@app.get("/api/vehicles/styles", tags=["Vehicle Dropdown Lookups"])
+def get_vehicle_styles(
+    year: int = Query(..., description="Model Year (e.g. 2003, 2024)"),
+    make: str = Query(..., description="Make Name (e.g. Mazda, Toyota)"),
+    model: str = Query(..., description="Model Name (e.g. Protege, Camry)")
+):
+    """
+    Returns all styles/trims for a specific year, make, and model.
+
+    Live example: <a href="/api/vehicles/styles?year=2003&make=Mazda&model=Protege" target="_blank"><code>/api/vehicles/styles?year=2003&make=Mazda&model=Protege</code></a>
+    """
+    try:
+        styles = vehicle_client.list_styles_for_year_make_model(year=year, make=make.strip(), model=model.strip())
+        style_names = [getattr(s, "style_name", str(s)) for s in styles]
+        return {
+            "year": year,
+            "make": make,
+            "model": model,
+            "total_styles": len(style_names),
+            "styles": style_names
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading vehicle styles: {str(e)}")
+
+# -------------------------------------------------------------------
+# 2. VIN Decoder Endpoint
 # -------------------------------------------------------------------
 @app.get("/api/decode/{vin}", tags=["VIN Decoder"])
 def decode_vin(vin: str):
@@ -295,93 +382,93 @@ def decode_vin(vin: str):
         }
 
 # -------------------------------------------------------------------
-# 2. Safety Recalls Endpoints (Single & Batch)
+# 3. Safety Recalls Endpoints (Vehicle, Campaign, Batch)
 # -------------------------------------------------------------------
+@app.get("/api/recalls/campaign/{campaign_number}", tags=["Safety Recalls"])
+def get_recall_by_campaign(campaign_number: str):
+    """
+    Looks up a specific safety recall campaign by its unique NHTSA Campaign Number.
+    Returns campaign details along with an array of all affected vehicle makes, models, and years.
+
+    Live example: <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
+    """
+    c_num = campaign_number.strip().upper()
+    url = f"https://api.nhtsa.gov/recalls/campaignNumber?campaignNumber={c_num}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="NHTSA Campaign API request failed.")
+        
+        raw_results = response.json().get("results", [])
+        if not raw_results:
+            raise HTTPException(status_code=404, detail=f"No recall found matching campaign number '{c_num}'.")
+        
+        first_record = raw_results[0]
+        raw_date = first_record.get("ReportReceivedDate") or first_record.get("reportReceivedDate")
+
+        affected_vehicles = []
+        seen_vehicles = set()
+
+        for r in raw_results:
+            v_make = str(r.get("Make") or r.get("make") or "").upper()
+            v_model = str(r.get("Model") or r.get("model") or "").title()
+            raw_y = r.get("ModelYear") or r.get("modelYear")
+            
+            v_year = None
+            if raw_y is not None:
+                try:
+                    v_year = int(str(raw_y).strip())
+                except (ValueError, TypeError):
+                    v_year = raw_y
+
+            vehicle_tuple = (v_make, v_model, v_year)
+            if vehicle_tuple not in seen_vehicles and any(vehicle_tuple):
+                seen_vehicles.add(vehicle_tuple)
+                affected_vehicles.append({
+                    "make": v_make if v_make else None,
+                    "model": v_model if v_model else None,
+                    "year": v_year
+                })
+
+        return {
+            "campaign_number": c_num,
+            "mfr_recall_number": first_record.get("ManufacturerCampaignNumber") or first_record.get("manufacturerCampaignNumber") or first_record.get("mfrRecallNumber"),
+            "tsa_action_number": first_record.get("TSAActionNumber") or first_record.get("tsaActionNumber"),
+            "recall_date": parse_nhtsa_date(raw_date),
+            "component": first_record.get("Component") or first_record.get("component"),
+            "summary": first_record.get("Summary") or first_record.get("summary"),
+            "consequence": first_record.get("Conequence") or first_record.get("consequence"),
+            "remedy": first_record.get("Remedy") or first_record.get("remedy"),
+            "notes": first_record.get("Notes") or first_record.get("notes"),
+            "park_it": bool(first_record.get("parkIt") or first_record.get("ParkIt") or False),
+            "park_outside": bool(first_record.get("parkOutSide") or first_record.get("ParkOutside") or first_record.get("parkOutside") or False),
+            "over_the_air_update": bool(first_record.get("overTheAirUpdate") or first_record.get("OverTheAirUpdate") or False),
+            "total_affected_models": len(affected_vehicles),
+            "affected_vehicles": affected_vehicles
+        }
+    except HTTPException:
+        raise
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
+
+
 @app.get("/api/recalls", tags=["Safety Recalls"])
 def get_recalls(
     vin: Optional[str] = Query(None, description="17-character VIN (auto-resolves Year, Make, Model)"),
     make: Optional[str] = Query(None, description="Vehicle Make (e.g., Tesla, Honda)"),
     model: Optional[str] = Query(None, description="Vehicle Model (e.g., Model S, Accord)"),
     year: Optional[int] = Query(None, description="Model Year (e.g., 2014, 2023)"),
-    campaign_number: Optional[str] = Query(None, description="NHTSA Campaign Number (e.g., 17V260000)"),
     since_date: Optional[str] = Query(None, description="Filter recalls on/after this date (YYYY-MM-DD)"),
     only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only")
 ):
     """
-    Queries official NHTSA safety recalls by Campaign Number, VIN, or Make/Model/Year.
+    Queries safety recalls for a vehicle via **VIN** OR **Make/Model/Year**.
 
     Live examples:
-    * Query by Campaign Number: <a href="/api/recalls?campaign_number=17V260000" target="_blank"><code>/api/recalls?campaign_number=17V260000</code></a>
     * Query by VIN: <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
     * Query by Make/Model/Year: <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
     * Query with date filter: <a href="/api/recalls?make=tesla&model=model%20s&year=2014&since_date=2020-01-01" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014&since_date=2020-01-01</code></a>
     """
-    # ---------------------------------------------------------------
-    # Path A: Query by Campaign Number (Normalized Output Schema)
-    # ---------------------------------------------------------------
-    if campaign_number:
-        c_num = campaign_number.strip().upper()
-        url = f"https://api.nhtsa.gov/recalls/campaignNumber?campaignNumber={c_num}"
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail="NHTSA Campaign API request failed.")
-            
-            raw_results = response.json().get("results", [])
-            if not raw_results:
-                raise HTTPException(status_code=404, detail=f"No recall found matching campaign number '{c_num}'.")
-            
-            # Base metadata taken from the primary record
-            first_record = raw_results[0]
-            raw_date = first_record.get("ReportReceivedDate") or first_record.get("reportReceivedDate")
-
-            # Extract and deduplicate affected vehicle combinations
-            affected_vehicles = []
-            seen_vehicles = set()
-
-            for r in raw_results:
-                v_make = str(r.get("Make") or r.get("make") or "").upper()
-                v_model = str(r.get("Model") or r.get("model") or "").title()
-                raw_y = r.get("ModelYear") or r.get("modelYear")
-                
-                v_year = None
-                if raw_y is not None:
-                    try:
-                        v_year = int(str(raw_y).strip())
-                    except (ValueError, TypeError):
-                        v_year = raw_y
-
-                vehicle_tuple = (v_make, v_model, v_year)
-                if vehicle_tuple not in seen_vehicles and any(vehicle_tuple):
-                    seen_vehicles.add(vehicle_tuple)
-                    affected_vehicles.append({
-                        "make": v_make if v_make else None,
-                        "model": v_model if v_model else None,
-                        "year": v_year
-                    })
-
-            return {
-                "campaign_number": c_num,
-                "recall_date": parse_nhtsa_date(raw_date),
-                "component": first_record.get("Component") or first_record.get("component"),
-                "summary": first_record.get("Summary") or first_record.get("summary"),
-                "consequence": first_record.get("Conequence") or first_record.get("consequence"),
-                "remedy": first_record.get("Remedy") or first_record.get("remedy"),
-                "notes": first_record.get("Notes") or first_record.get("notes"),
-                "park_it": bool(first_record.get("parkIt") or first_record.get("ParkIt") or False),
-                "park_outside": bool(first_record.get("parkOutSide") or first_record.get("ParkOutside") or first_record.get("parkOutside") or False),
-                "over_the_air_update": bool(first_record.get("overTheAirUpdate") or first_record.get("OverTheAirUpdate") or False),
-                "total_affected_models": len(affected_vehicles),
-                "affected_vehicles": affected_vehicles
-            }
-        except HTTPException:
-            raise
-        except requests.exceptions.RequestException as e:
-            raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
-
-    # ---------------------------------------------------------------
-    # Path B: Query by VIN or Vehicle Specification
-    # ---------------------------------------------------------------
     if vin:
         vin = vin.strip().upper()
         if len(vin) != 17:
@@ -400,7 +487,7 @@ def get_recalls(
     if not make or not model or not year:
         raise HTTPException(
             status_code=400, 
-            detail="Provide 'campaign_number', 'vin', OR all three of ('make', 'model', 'year')."
+            detail="Provide either 'vin' OR all three of ('make', 'model', 'year')."
         )
 
     try:
@@ -450,7 +537,7 @@ def get_batch_recalls_json(payload: BatchRecallRequest):
     return run_batch_recall_logic(payload.vins, since_date=payload.since_date, only_critical=payload.only_critical)
 
 # -------------------------------------------------------------------
-# 3. OBD-II DTC Lookup Endpoint (Thread-Safe)
+# 4. OBD-II DTC Lookup Endpoint (Thread-Safe)
 # -------------------------------------------------------------------
 @app.get("/api/dtc/{code}", tags=["OBD-II Diagnostics"])
 def get_dtc(
