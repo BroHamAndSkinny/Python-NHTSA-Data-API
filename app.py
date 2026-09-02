@@ -14,7 +14,8 @@ from sqlalchemy import select
 import database
 from database import (
     init_db, get_db, DecodedVIN, VehicleSyncProfile,
-    RecallCampaign, CampaignVehicleAssociation
+    RecallCampaign, CampaignVehicleAssociation,
+    VehicleSafetyRating, VehicleComplaint
 )
 
 # Local module imports
@@ -33,13 +34,22 @@ Unified REST API microservice for VIN decoding, safety recalls, OBD-II DTC diagn
 * <a href="/api/vehicles/makes?year=2003" target="_blank"><code>/api/vehicles/makes?year=2003</code></a>
 * <a href="/api/vehicles/models?year=2003&make=Mazda" target="_blank"><code>/api/vehicles/models?year=2003&make=Mazda</code></a>
 * <a href="/api/vehicles/styles?year=2003&make=Mazda&model=Protege" target="_blank"><code>/api/vehicles/styles?year=2003&make=Mazda&model=Protege</code></a>
+* --------------------------------------------------
 * <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
 * <a href="/api/decode/5YJSA1E26EF000001?refresh=true" target="_blank"><code>/api/decode/5YJSA1E26EF000001?refresh=true</code></a>
+* --------------------------------------------------
 * <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
 * <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
 * <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
 * <a href="/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01" target="_blank"><code>/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01</code></a>
+* --------------------------------------------------
+* <a href="/api/safety-ratings?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/safety-ratings?make=tesla&model=model%20s&year=2014</code></a>
+* <a href="/api/complaints?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/complaints?make=tesla&model=model%20s&year=2014</code></a>
+* --------------------------------------------------
+* <a href="/api/vehicle-report/5YJSA1E26EF000001" target="_blank"><code>/api/vehicle-report/5YJSA1E26EF000001</code></a>
+* --------------------------------------------------
 * <a href="/api/dtc/P0300" target="_blank"><code>/api/dtc/P0300</code></a>
+* --------------------------------------------------
 * <a href="/api/admin/db/stats" target="_blank"><code>/api/admin/db/stats</code></a>
 * <a href="/api/admin/db/tracked-vehicles" target="_blank"><code>/api/admin/db/tracked-vehicles</code></a>
 * <a href="/api/admin/db/vins" target="_blank"><code>/api/admin/db/vins</code></a>
@@ -668,7 +678,115 @@ def process_batch(vin_list: List[str], since_date: Optional[str], only_critical:
     return {"total_queried": len(results), "results": results}
 
 # -------------------------------------------------------------------
-# 4. Database Management & Admin Endpoints
+# 4. Unified Comprehensive Vehicle Report
+# -------------------------------------------------------------------
+@app.get("/api/vehicle-report/{vin}", tags=["Comprehensive Vehicle Report"])
+def get_vehicle_report(
+    vin: str,
+    refresh: bool = Query(False, description="Force re-fetch all datasets from upstream government APIs"),
+    complaints_limit: int = Query(25, ge=1, le=100, description="Max complaints to include in report"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns an all-in-one dossier for a vehicle using its 17-character VIN:
+    - Decoded factory specifications
+    - Active safety recall campaigns
+    - NHTSA 5-Star Crash Safety Ratings
+    - Consumer defect complaints summary and recent reports
+
+    All datasets check the local persistent database first and populate automatically on a cache miss.
+
+    Live example: <a href="/api/vehicle-report/5YJSA1E26EF000001" target="_blank"><code>/api/vehicle-report/5YJSA1E26EF000001</code></a>
+    """
+    v_clean = vin.strip().upper()
+    if len(v_clean) != 17:
+        raise HTTPException(status_code=400, detail="Invalid VIN length. VIN must be exactly 17 characters.")
+
+    # 1. Decode VIN or load from DB
+    decode_result = decode_vin(vin=v_clean, refresh=refresh, db=db)
+    make = decode_result.get("make")
+    model = decode_result.get("model")
+    year = decode_result.get("year")
+
+    if not make or not model or not year:
+        return {
+            "vin": v_clean,
+            "status": "partial_metadata",
+            "message": "Could not extract Year, Make, and Model from VIN to fetch complete safety dossiers.",
+            "specifications": decode_result
+        }
+
+    # 2. Get Safety Recalls
+    recalls_payload = get_recalls(
+        vin=v_clean,
+        make=make,
+        model=model,
+        year=year,
+        since_date=None,
+        only_critical=False,
+        db=db
+    )
+
+    # 3. Get 5-Star Safety Ratings (safe fallback if unrated)
+    safety_ratings = None
+    try:
+        safety_ratings = get_safety_ratings(
+            make=make,
+            model=model,
+            year=year,
+            refresh=refresh,
+            db=db
+        )
+    except HTTPException:
+        safety_ratings = {
+            "overall_rating": "Not Rated",
+            "message": f"No crash test data available for {year} {make} {model}."
+        }
+
+    # 4. Get Complaints
+    complaints_payload = None
+    try:
+        complaints_payload = get_complaints(
+            make=make,
+            model=model,
+            year=year,
+            limit=complaints_limit,
+            refresh=refresh,
+            db=db
+        )
+    except HTTPException:
+        complaints_payload = {
+            "total_complaints": 0,
+            "complaints": []
+        }
+
+    # 5. Assemble and return unified vehicle dossier
+    return {
+        "vin": v_clean,
+        "vehicle": {
+            "year": year,
+            "make": make,
+            "model": model,
+            "trim": decode_result.get("trim"),
+            "body_class": decode_result.get("body_class"),
+        },
+        "report_summary": {
+            "total_recalls": recalls_payload.get("total_recalls", 0),
+            "critical_safety_recalls": sum(
+                1 for r in recalls_payload.get("recalls", []) 
+                if r.get("park_it") or r.get("park_outside")
+            ),
+            "safety_rating_overall": safety_ratings.get("overall_rating") if safety_ratings else "Not Rated",
+            "total_consumer_complaints": complaints_payload.get("total_complaints", 0) if complaints_payload else 0
+        },
+        "specifications": decode_result.get("specifications", {}),
+        "recalls": recalls_payload.get("recalls", []),
+        "safety_ratings": safety_ratings,
+        "consumer_complaints": complaints_payload
+    }
+
+# -------------------------------------------------------------------
+# 5. Database Management & Admin Endpoints
 # -------------------------------------------------------------------
 @app.get("/api/admin/db/stats", tags=["Database Management"])
 def get_database_stats(db: Session = Depends(get_db)):
@@ -679,6 +797,8 @@ def get_database_stats(db: Session = Depends(get_db)):
             "decoded_vins": db.query(DecodedVIN).count(),
             "tracked_vehicle_profiles": db.query(VehicleSyncProfile).count(),
             "saved_recall_campaigns": db.query(RecallCampaign).count(),
+            "saved_safety_ratings": db.query(VehicleSafetyRating).count(),
+            "saved_complaints": db.query(VehicleComplaint).count(),
             "campaign_vehicle_associations": db.query(CampaignVehicleAssociation).count()
         }
     }
@@ -768,7 +888,7 @@ def purge_vehicle_recalls(
     }
 
 # -------------------------------------------------------------------
-# 5. OBD-II DTC Lookup Endpoint
+# 6. OBD-II DTC Lookup Endpoint
 # -------------------------------------------------------------------
 @app.get("/api/dtc/{code}", tags=["OBD-II Diagnostics"])
 def get_dtc(
@@ -796,3 +916,224 @@ def get_dtc(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DTC Database query error: {str(e)}")
+    
+# -------------------------------------------------------------------
+# 7. Safety Ratings & Complaints Endpoints (Database-First)
+# -------------------------------------------------------------------
+@app.get("/api/safety-ratings", tags=["Vehicle Safety & Defect Intel"])
+def get_safety_ratings(
+    make: str = Query(..., description="Vehicle Make (e.g. Tesla, Honda)"),
+    model: str = Query(..., description="Vehicle Model (e.g. Model S, Accord)"),
+    year: int = Query(..., description="Model Year (e.g. 2014, 2022)"),
+    refresh: bool = Query(False, description="Force re-query upstream NHTSA API"),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves NHTSA 5-Star Safety Ratings (NCAP frontal, side, rollover stars).
+    Checks local DB first; falls back to NHTSA and caches locally.
+
+    Live example: <a href="/api/safety-ratings?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/safety-ratings?make=tesla&model=model%20s&year=2014</code></a>
+    """
+    m, mod, y = make.strip().upper(), model.strip().lower(), int(year)
+
+    cached = db.scalar(
+        select(VehicleSafetyRating).where(
+            VehicleSafetyRating.make == m,
+            VehicleSafetyRating.model == mod,
+            VehicleSafetyRating.year == y
+        )
+    )
+    if cached and not refresh:
+        return {
+            "make": cached.make,
+            "model": cached.model.title(),
+            "year": cached.year,
+            "overall_rating": cached.overall_rating,
+            "overall_front_crash_rating": cached.overall_front_crash_rating,
+            "front_crash_driverside_rating": cached.front_crash_driverside_rating,
+            "front_crash_passengerside_rating": cached.front_crash_passengerside_rating,
+            "overall_side_crash_rating": cached.overall_side_crash_rating,
+            "side_crash_driverside_rating": cached.side_crash_driverside_rating,
+            "side_crash_passengerside_rating": cached.side_crash_passengerside_rating,
+            "rollover_rating": cached.rollover_rating,
+            "rollover_possibility": cached.rollover_possibility,
+            "complaints_count": cached.complaints_count,
+            "recalls_count": cached.recalls_count,
+            "investigation_count": cached.investigation_count,
+            "source": "local_database"
+        }
+
+    # Step 1: Query variant list to get VehicleId
+    variants_url = f"https://api.nhtsa.gov/SafetyRatings/modelyear/{y}/make/{m}/model/{mod}"
+    try:
+        resp = requests.get(variants_url, timeout=10)
+        results = resp.json().get("Results", []) if resp.status_code == 200 else []
+        if not results:
+            raise HTTPException(status_code=404, detail=f"No safety test data found for {y} {make} {model}.")
+
+        vehicle_id = results[0].get("VehicleId")
+
+        # Step 2: Fetch ratings by VehicleId
+        ratings_url = f"https://api.nhtsa.gov/SafetyRatings/VehicleId/{vehicle_id}"
+        r_resp = requests.get(ratings_url, timeout=10)
+        r_data = r_resp.json().get("Results", [{}])[0]
+
+        if not cached:
+            cached = VehicleSafetyRating(make=m, model=mod, year=y)
+            db.add(cached)
+
+        cached.overall_rating = str(r_data.get("OverallRating", "Not Rated"))
+        cached.overall_front_crash_rating = str(r_data.get("OverallFrontCrashRating", "Not Rated"))
+        cached.front_crash_driverside_rating = str(r_data.get("FrontCrashDriversideRating", "Not Rated"))
+        cached.front_crash_passengerside_rating = str(r_data.get("FrontCrashPassengersideRating", "Not Rated"))
+        cached.overall_side_crash_rating = str(r_data.get("OverallSideCrashRating", "Not Rated"))
+        cached.side_crash_driverside_rating = str(r_data.get("SideCrashDriversideRating", "Not Rated"))
+        cached.side_crash_passengerside_rating = str(r_data.get("SideCrashPassengersideRating", "Not Rated"))
+        cached.rollover_rating = str(r_data.get("RolloverRating", "Not Rated"))
+        cached.rollover_possibility = r_data.get("RolloverPossibility")
+        cached.complaints_count = r_data.get("ComplaintsCount")
+        cached.recalls_count = r_data.get("RecallsCount")
+        cached.investigation_count = r_data.get("InvestigationCount")
+        cached.raw_ratings = r_data
+
+        db.commit()
+
+        return {
+            "make": m,
+            "model": mod.title(),
+            "year": y,
+            "overall_rating": cached.overall_rating,
+            "overall_front_crash_rating": cached.overall_front_crash_rating,
+            "front_crash_driverside_rating": cached.front_crash_driverside_rating,
+            "front_crash_passengerside_rating": cached.front_crash_passengerside_rating,
+            "overall_side_crash_rating": cached.overall_side_crash_rating,
+            "side_crash_driverside_rating": cached.side_crash_driverside_rating,
+            "side_crash_passengerside_rating": cached.side_crash_passengerside_rating,
+            "rollover_rating": cached.rollover_rating,
+            "rollover_possibility": cached.rollover_possibility,
+            "complaints_count": cached.complaints_count,
+            "recalls_count": cached.recalls_count,
+            "investigation_count": cached.investigation_count,
+            "source": "nhtsa_live"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error querying safety ratings: {str(e)}")
+
+
+@app.get("/api/complaints", tags=["Vehicle Safety & Defect Intel"])
+def get_complaints(
+    make: str = Query(..., description="Vehicle Make (e.g. Tesla, Ford)"),
+    model: str = Query(..., description="Vehicle Model (e.g. Model S, F-150)"),
+    year: int = Query(..., description="Model Year (e.g. 2014, 2021)"),
+    limit: int = Query(50, ge=1, le=100, description="Max complaint records to return"),
+    refresh: bool = Query(False, description="Force re-query upstream NHTSA complaints"),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves consumer-reported defect complaints from NHTSA's Office of Defects Investigation (ODI).
+    Checks local DB first; queries NHTSA and caches on miss.
+
+    Live example: <a href="/api/complaints?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/complaints?make=tesla&model=model%20s&year=2014</code></a>
+    """
+    m, mod, y = make.strip().upper(), model.strip().lower(), int(year)
+
+    cached_complaints = db.scalars(
+        select(VehicleComplaint).where(
+            VehicleComplaint.make == m,
+            VehicleComplaint.model == mod,
+            VehicleComplaint.year == y
+        ).order_by(VehicleComplaint.date_complaint_filed.desc())
+    ).all()
+
+    if cached_complaints and not refresh:
+        items = cached_complaints[:limit]
+        return {
+            "make": m,
+            "model": mod.title(),
+            "year": y,
+            "total_complaints": len(cached_complaints),
+            "source": "local_database",
+            "complaints": [
+                {
+                    "odi_number": c.odi_number,
+                    "incident_date": c.incident_date,
+                    "date_complaint_filed": c.date_complaint_filed,
+                    "crash": c.crash,
+                    "fire": c.fire,
+                    "injured": c.injured,
+                    "deaths": c.deaths,
+                    "components": c.components,
+                    "summary": c.summary
+                }
+                for c in items
+            ]
+        }
+
+    url = f"https://api.nhtsa.gov/complaints/complaintsByVehicle?make={m}&model={mod}&modelYear={y}"
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="NHTSA Complaints API request failed.")
+
+        raw_results = resp.json().get("results", [])
+
+        for r in raw_results:
+            odi = r.get("odiNumber")
+            if not odi:
+                continue
+
+            existing = db.scalar(select(VehicleComplaint).where(VehicleComplaint.odi_number == int(odi)))
+            if not existing:
+                db.add(VehicleComplaint(
+                    odi_number=int(odi),
+                    make=m,
+                    model=mod,
+                    year=y,
+                    crash=bool(r.get("crash", False)),
+                    fire=bool(r.get("fire", False)),
+                    injured=int(r.get("numberOfInjured", 0) or 0),
+                    deaths=int(r.get("numberOfDeaths", 0) or 0),
+                    incident_date=parse_nhtsa_date(r.get("dateOfIncident")),
+                    date_complaint_filed=parse_nhtsa_date(r.get("dateComplaintFiled")),
+                    components=r.get("components"),
+                    summary=r.get("summary")
+                ))
+
+        db.commit()
+
+        # Re-query newly saved records
+        saved = db.scalars(
+            select(VehicleComplaint).where(
+                VehicleComplaint.make == m,
+                VehicleComplaint.model == mod,
+                VehicleComplaint.year == y
+            ).order_by(VehicleComplaint.date_complaint_filed.desc())
+        ).all()
+
+        return {
+            "make": m,
+            "model": mod.title(),
+            "year": y,
+            "total_complaints": len(saved),
+            "source": "nhtsa_live",
+            "complaints": [
+                {
+                    "odi_number": c.odi_number,
+                    "incident_date": c.incident_date,
+                    "date_complaint_filed": c.date_complaint_filed,
+                    "crash": c.crash,
+                    "fire": c.fire,
+                    "injured": c.injured,
+                    "deaths": c.deaths,
+                    "components": c.components,
+                    "summary": c.summary
+                }
+                for c in saved[:limit]
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error querying complaints: {str(e)}")

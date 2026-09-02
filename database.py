@@ -90,6 +90,54 @@ class CampaignVehicleAssociation(Base):
         UniqueConstraint("campaign_number", "make", "model", "year", name="uq_camp_vehicle"),
     )
 
+class VehicleSafetyRating(Base):
+    __tablename__ = "vehicle_safety_ratings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    make: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    overall_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    overall_front_crash_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    front_crash_driverside_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    front_crash_passengerside_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    overall_side_crash_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    side_crash_driverside_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    side_crash_passengerside_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    rollover_rating: Mapped[Optional[str]] = mapped_column(String(20))
+    rollover_possibility: Mapped[Optional[float]] = mapped_column(JSON)
+    complaints_count: Mapped[Optional[int]] = mapped_column(Integer)
+    recalls_count: Mapped[Optional[int]] = mapped_column(Integer)
+    investigation_count: Mapped[Optional[int]] = mapped_column(Integer)
+    raw_ratings: Mapped[Optional[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("make", "model", "year", name="uq_safety_rating_mmy"),
+    )
+
+class VehicleComplaint(Base):
+    __tablename__ = "vehicle_complaints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    odi_number: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    make: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    crash: Mapped[bool] = mapped_column(Boolean, default=False)
+    fire: Mapped[bool] = mapped_column(Boolean, default=False)
+    injured: Mapped[int] = mapped_column(Integer, default=0)
+    deaths: Mapped[int] = mapped_column(Integer, default=0)
+    incident_date: Mapped[Optional[str]] = mapped_column(String(20))
+    date_complaint_filed: Mapped[Optional[str]] = mapped_column(String(20))
+    components: Mapped[Optional[str]] = mapped_column(Text)
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("odi_number", name="uq_complaint_odi"),
+    )
+
 def init_db():
     """Initializes tables on startup."""
     Base.metadata.create_all(bind=engine)
