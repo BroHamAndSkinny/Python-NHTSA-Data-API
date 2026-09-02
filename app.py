@@ -34,6 +34,7 @@ Unified REST API microservice for VIN decoding, safety recalls, OBD-II DTC diagn
 * <a href="/api/vehicles/models?year=2003&make=Mazda" target="_blank"><code>/api/vehicles/models?year=2003&make=Mazda</code></a>
 * <a href="/api/vehicles/styles?year=2003&make=Mazda&model=Protege" target="_blank"><code>/api/vehicles/styles?year=2003&make=Mazda&model=Protege</code></a>
 * <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
+* <a href="/api/decode/5YJSA1E26EF000001?refresh=true" target="_blank"><code>/api/decode/5YJSA1E26EF000001?refresh=true</code></a>
 * <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
 * <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
 * <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
@@ -43,7 +44,7 @@ Unified REST API microservice for VIN decoding, safety recalls, OBD-II DTC diagn
 * <a href="/api/admin/db/tracked-vehicles" target="_blank"><code>/api/admin/db/tracked-vehicles</code></a>
 * <a href="/api/admin/db/vins" target="_blank"><code>/api/admin/db/vins</code></a>
     """,
-    version="2.0.0",
+    version="2.1.0",
     docs_url=None,
     redoc_url="/redoc"
 )
@@ -92,6 +93,14 @@ def parse_nhtsa_date(date_str: Optional[str]) -> Optional[str]:
         except Exception:
             pass
     return date_str
+
+def extract_vin_specs(vehicle) -> Dict[str, Any]:
+    """Helper to extract non-core attributes from decoded vehicle object."""
+    specs: Dict[str, Any] = {}
+    for attr, val in vars(vehicle).items():
+        if val is not None and attr not in ["vin", "year", "make", "model", "trim", "body_class"]:
+            specs[attr] = val
+    return specs
 
 # -------------------------------------------------------------------
 # Database Recall Sync Helper
@@ -289,22 +298,30 @@ def get_vehicle_styles(
         raise HTTPException(status_code=500, detail=f"Error reading vehicle styles: {str(e)}")
 
 # -------------------------------------------------------------------
-# 2. VIN Decoder Endpoint (Database First)
+# 2. VIN Decoder Endpoint (Auto-Heals & Supports ?refresh=true)
 # -------------------------------------------------------------------
 @app.get("/api/decode/{vin}", tags=["VIN Decoder"])
-def decode_vin(vin: str, db: Session = Depends(get_db)):
+def decode_vin(
+    vin: str, 
+    refresh: bool = Query(False, description="Force re-query upstream NHTSA vPIC and overwrite local cached specs"),
+    db: Session = Depends(get_db)
+):
     """
     Decodes a 17-character VIN.
-    Checks the local database first; falls back to NHTSA vPIC + offline WMI on a miss.
+    Checks the local database first. If specifications are missing or `refresh=true`, queries NHTSA vPIC and updates the DB.
 
-    Live example: <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
+    Live examples:
+    * Cached query: <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
+    * Force refresh: <a href="/api/decode/5YJSA1E26EF000001?refresh=true" target="_blank"><code>/api/decode/5YJSA1E26EF000001?refresh=true</code></a>
     """
     vin = vin.strip().upper()
     if len(vin) != 17:
         raise HTTPException(status_code=400, detail="Invalid VIN length. VIN must be exactly 17 characters.")
     
     cached = db.get(DecodedVIN, vin)
-    if cached:
+    
+    # Return immediately if cached and specifications are populated (unless refresh is requested)
+    if cached and not refresh and cached.specifications:
         return {
             "vin": cached.vin,
             "year": cached.year,
@@ -312,40 +329,61 @@ def decode_vin(vin: str, db: Session = Depends(get_db)):
             "model": cached.model,
             "trim": cached.trim,
             "body_class": cached.body_class,
-            "specifications": cached.specifications or {},
+            "specifications": cached.specifications,
             "source": "local_database"
         }
 
+    # Query NHTSA vPIC to populate or self-heal
     try:
         vehicle = vin_decoder.decode(vin)
-        specs: Dict[str, Any] = {}
-        for attr, val in vars(vehicle).items():
-            if val is not None and attr not in ["vin", "year", "make", "model", "trim", "body_class"]:
-                specs[attr] = val
+        specs = extract_vin_specs(vehicle)
 
-        decoded_record = DecodedVIN(
-            vin=vin,
-            year=getattr(vehicle, "year", None),
-            make=getattr(vehicle, "make", None),
-            model=getattr(vehicle, "model", None),
-            trim=getattr(vehicle, "trim", None),
-            body_class=getattr(vehicle, "body_class", None),
-            specifications=specs
-        )
-        db.add(decoded_record)
+        if not cached:
+            cached = DecodedVIN(
+                vin=vin,
+                year=getattr(vehicle, "year", None),
+                make=getattr(vehicle, "make", None),
+                model=getattr(vehicle, "model", None),
+                trim=getattr(vehicle, "trim", None),
+                body_class=getattr(vehicle, "body_class", None),
+                specifications=specs
+            )
+            db.add(cached)
+        else:
+            # Update existing row with full data
+            cached.year = getattr(vehicle, "year", cached.year)
+            cached.make = getattr(vehicle, "make", cached.make)
+            cached.model = getattr(vehicle, "model", cached.model)
+            cached.trim = getattr(vehicle, "trim", cached.trim)
+            cached.body_class = getattr(vehicle, "body_class", cached.body_class)
+            cached.specifications = specs
+
         db.commit()
 
         return {
             "vin": vin,
-            "year": decoded_record.year,
-            "make": decoded_record.make,
-            "model": decoded_record.model,
-            "trim": decoded_record.trim,
-            "body_class": decoded_record.body_class,
+            "year": cached.year,
+            "make": cached.make,
+            "model": cached.model,
+            "trim": cached.trim,
+            "body_class": cached.body_class,
             "specifications": specs,
             "source": "nhtsa_vpic"
         }
     except Exception as e:
+        if cached:
+            return {
+                "vin": cached.vin,
+                "year": cached.year,
+                "make": cached.make,
+                "model": cached.model,
+                "trim": cached.trim,
+                "body_class": cached.body_class,
+                "specifications": cached.specifications or {},
+                "source": "local_database",
+                "warning": f"Refresh failed: {str(e)}"
+            }
+        
         manufacturer = WMIDatabase.get_manufacturer(vin)
         year = WMIDatabase.get_year(vin)
         return {
@@ -364,17 +402,21 @@ def decode_vin(vin: str, db: Session = Depends(get_db)):
 # 3. Safety Recalls Endpoints (Database First)
 # -------------------------------------------------------------------
 @app.get("/api/recalls/campaign/{campaign_number}", tags=["Safety Recalls"])
-def get_recall_by_campaign(campaign_number: str, db: Session = Depends(get_db)):
+def get_recall_by_campaign(
+    campaign_number: str, 
+    refresh: bool = Query(False, description="Force re-query upstream NHTSA and update local database"),
+    db: Session = Depends(get_db)
+):
     """
     Looks up a safety recall campaign by NHTSA Campaign Number.
-    Checks local DB first; falls back to NHTSA on a miss.
+    Checks local DB first; falls back to NHTSA on a miss or when `refresh=true`.
 
     Live example: <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
     """
     c_num = campaign_number.strip().upper()
 
     cached_campaign = db.scalar(select(RecallCampaign).where(RecallCampaign.campaign_number == c_num))
-    if cached_campaign and cached_campaign.affected_vehicles:
+    if cached_campaign and cached_campaign.affected_vehicles and not refresh:
         return {
             "campaign_number": cached_campaign.campaign_number,
             "mfr_recall_number": cached_campaign.mfr_recall_number,
@@ -421,7 +463,7 @@ def get_recall_by_campaign(campaign_number: str, db: Session = Depends(get_db)):
                 remedy=first.get("Remedy") or first.get("remedy"),
                 notes=first.get("Notes") or first.get("notes"),
                 park_it=bool(first.get("parkIt") or first.get("ParkIt") or False),
-                park_outside=bool(first.get("parkOutSide") or first.get("ParkOutside") or first.get("parkOutside") or False),
+                park_outside=bool(first.get("parkOutSide") or first.get("ParkOutside") or False),
                 over_the_air_update=bool(first.get("overTheAirUpdate") or first.get("OverTheAirUpdate") or False)
             )
             db.add(cached_campaign)
@@ -514,9 +556,12 @@ def get_recalls(
                 if not make or not model or not year:
                     raise HTTPException(status_code=422, detail="Could not resolve Make, Model, or Year from VIN.")
                 
+                # Save full specs even when resolved through recalls
+                specs = extract_vin_specs(vehicle)
                 db.add(DecodedVIN(
                     vin=vin, year=int(year), make=str(make).upper(), model=str(model).title(),
-                    trim=getattr(vehicle, "trim", None), body_class=getattr(vehicle, "body_class", None)
+                    trim=getattr(vehicle, "trim", None), body_class=getattr(vehicle, "body_class", None),
+                    specifications=specs
                 ))
                 db.commit()
             except Exception as e:
@@ -559,17 +604,11 @@ def get_batch_recalls_query(
     only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only"),
     db: Session = Depends(get_db)
 ):
-    """
-    Checks recalls for multiple fleet vehicles using URL query parameters.
-    """
     vin_list = [v.strip() for v in vins.split(",") if v.strip()]
     return process_batch(vin_list, since_date, only_critical, db)
 
 @app.post("/api/recalls/batch", tags=["Safety Recalls"])
 def get_batch_recalls_json(payload: BatchRecallRequest, db: Session = Depends(get_db)):
-    """
-    Checks recalls for multiple fleet vehicles using a JSON request body.
-    """
     return process_batch(payload.vins, payload.since_date, payload.only_critical, db)
 
 def process_batch(vin_list: List[str], since_date: Optional[str], only_critical: bool, db: Session):
@@ -590,9 +629,11 @@ def process_batch(vin_list: List[str], since_date: Optional[str], only_critical:
                 if not make or not model or not year:
                     results.append({"vin": v, "status": "error", "message": "Could not resolve metadata"})
                     continue
+                specs = extract_vin_specs(vehicle)
                 db.add(DecodedVIN(
                     vin=v, year=int(year), make=str(make).upper(), model=str(model).title(),
-                    trim=getattr(vehicle, "trim", None), body_class=getattr(vehicle, "body_class", None)
+                    trim=getattr(vehicle, "trim", None), body_class=getattr(vehicle, "body_class", None),
+                    specifications=specs
                 ))
                 db.commit()
             except Exception as e:
@@ -631,33 +672,20 @@ def process_batch(vin_list: List[str], since_date: Optional[str], only_critical:
 # -------------------------------------------------------------------
 @app.get("/api/admin/db/stats", tags=["Database Management"])
 def get_database_stats(db: Session = Depends(get_db)):
-    """
-    Returns total record counts across all persistent SQLite / Postgres tables.
-
-    Live example: <a href="/api/admin/db/stats" target="_blank"><code>/api/admin/db/stats</code></a>
-    """
-    total_vins = db.query(DecodedVIN).count()
-    total_profiles = db.query(VehicleSyncProfile).count()
-    total_campaigns = db.query(RecallCampaign).count()
-    total_associations = db.query(CampaignVehicleAssociation).count()
-
+    """Returns total record counts across all persistent tables."""
     return {
         "database_engine": database.DATABASE_URL.split(":///")[0],
         "tables": {
-            "decoded_vins": total_vins,
-            "tracked_vehicle_profiles": total_profiles,
-            "saved_recall_campaigns": total_campaigns,
-            "campaign_vehicle_associations": total_associations
+            "decoded_vins": db.query(DecodedVIN).count(),
+            "tracked_vehicle_profiles": db.query(VehicleSyncProfile).count(),
+            "saved_recall_campaigns": db.query(RecallCampaign).count(),
+            "campaign_vehicle_associations": db.query(CampaignVehicleAssociation).count()
         }
     }
 
 @app.get("/api/admin/db/tracked-vehicles", tags=["Database Management"])
 def list_tracked_vehicles(db: Session = Depends(get_db)):
-    """
-    Lists all unique vehicle specifications currently scheduled for nightly cron sync.
-
-    Live example: <a href="/api/admin/db/tracked-vehicles" target="_blank"><code>/api/admin/db/tracked-vehicles</code></a>
-    """
+    """Lists all unique vehicle specifications currently scheduled for nightly cron sync."""
     profiles = db.scalars(select(VehicleSyncProfile).order_by(VehicleSyncProfile.make)).all()
     return {
         "total_tracked": len(profiles),
@@ -675,11 +703,7 @@ def list_tracked_vehicles(db: Session = Depends(get_db)):
 
 @app.get("/api/admin/db/vins", tags=["Database Management"])
 def list_saved_vins(limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db)):
-    """
-    Lists stored VINs and vehicle summaries currently saved in the database.
-
-    Live example: <a href="/api/admin/db/vins" target="_blank"><code>/api/admin/db/vins</code></a>
-    """
+    """Lists stored VINs and vehicle summaries currently saved in the database."""
     vins = db.scalars(select(DecodedVIN).order_by(DecodedVIN.created_at.desc()).limit(limit)).all()
     return {
         "count": len(vins),
@@ -689,11 +713,23 @@ def list_saved_vins(limit: int = Query(25, ge=1, le=100), db: Session = Depends(
                 "year": v.year,
                 "make": v.make,
                 "model": v.model,
+                "has_specifications": bool(v.specifications),
                 "created_at": v.created_at.isoformat() if v.created_at else None
             }
             for v in vins
         ]
     }
+
+@app.delete("/api/admin/db/vins/{vin}", tags=["Database Management"])
+def purge_saved_vin(vin: str, db: Session = Depends(get_db)):
+    """Purges a single VIN from the database so it will be re-decoded on next request."""
+    v_clean = vin.strip().upper()
+    cached = db.get(DecodedVIN, v_clean)
+    if not cached:
+        raise HTTPException(status_code=404, detail=f"VIN '{v_clean}' not found in database.")
+    db.delete(cached)
+    db.commit()
+    return {"status": "purged", "vin": v_clean}
 
 @app.delete("/api/admin/db/recalls", tags=["Database Management"])
 def purge_vehicle_recalls(
@@ -702,11 +738,8 @@ def purge_vehicle_recalls(
     year: int = Query(..., description="Model Year (e.g. 2014)"),
     db: Session = Depends(get_db)
 ):
-    """
-    Removes cached recall records and sync tracking for a vehicle to force an upstream NHTSA re-fetch.
-    """
+    """Removes cached recall records and sync tracking for a vehicle to force an upstream NHTSA re-fetch."""
     m, mod, y = make.strip().upper(), model.strip().lower(), int(year)
-    
     assocs = db.scalars(
         select(CampaignVehicleAssociation).where(
             CampaignVehicleAssociation.make == m,
@@ -714,7 +747,6 @@ def purge_vehicle_recalls(
             CampaignVehicleAssociation.year == y
         )
     ).all()
-    
     for a in assocs:
         db.delete(a)
 
