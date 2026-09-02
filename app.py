@@ -1,13 +1,21 @@
 import os
 import re
-import time
 import requests
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+
+# Database & ORM
+import database
+from database import (
+    init_db, get_db, DecodedVIN, VehicleSyncProfile,
+    RecallCampaign, CampaignVehicleAssociation
+)
 
 # Local module imports
 from modules.vin.nhtsa_vin_decoder import NHTSAVinDecoder
@@ -15,7 +23,6 @@ from modules.vin.wmi_database import WMIDatabase
 from modules.dtc.dtc_database import DTCDatabase
 from modules.vehicles import client as vehicle_client
 
-# Disable default /docs to render our custom styled Swagger UI
 app = FastAPI(
     title="NHTSA & Automotive Diagnostics API",
     description="""
@@ -32,21 +39,19 @@ Unified REST API microservice for VIN decoding, safety recalls, OBD-II DTC diagn
 * <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
 * <a href="/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01" target="_blank"><code>/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01</code></a>
 * <a href="/api/dtc/P0300" target="_blank"><code>/api/dtc/P0300</code></a>
+* <a href="/api/admin/db/stats" target="_blank"><code>/api/admin/db/stats</code></a>
+* <a href="/api/admin/db/tracked-vehicles" target="_blank"><code>/api/admin/db/tracked-vehicles</code></a>
+* <a href="/api/admin/db/vins" target="_blank"><code>/api/admin/db/vins</code></a>
     """,
-    version="1.7.0",
+    version="2.0.0",
     docs_url=None,
     redoc_url="/redoc"
 )
 
-# -------------------------------------------------------------------
-# In-Memory Recall Cache Config
-# -------------------------------------------------------------------
-RECALL_CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL_SECONDS = 86400  # 24 Hours
+@app.on_event("startup")
+def on_startup():
+    init_db()
 
-# -------------------------------------------------------------------
-# Custom Swagger UI Route
-# -------------------------------------------------------------------
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui() -> HTMLResponse:
     html = get_swagger_ui_html(
@@ -64,7 +69,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 dtc_db_path = os.path.join(current_dir, "modules", "dtc", "dtc_codes.db")
 
 def get_dtc_instance() -> DTCDatabase:
-    """Creates a thread-safe database connection instance for the request."""
     if os.path.exists(dtc_db_path):
         return DTCDatabase(dtc_db_path)
     return DTCDatabase()
@@ -72,17 +76,14 @@ def get_dtc_instance() -> DTCDatabase:
 vin_decoder = NHTSAVinDecoder()
 
 def parse_nhtsa_date(date_str: Optional[str]) -> Optional[str]:
-    """Normalizes NHTSA date strings to YYYY-MM-DD."""
     if not date_str:
         return None
     date_str = str(date_str).strip()
-    
     for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
         except ValueError:
             pass
-            
     epoch_match = re.search(r"\d+", date_str)
     if epoch_match and len(epoch_match.group()) >= 10:
         try:
@@ -90,146 +91,137 @@ def parse_nhtsa_date(date_str: Optional[str]) -> Optional[str]:
             return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
         except Exception:
             pass
-
     return date_str
 
-def format_recall_item(r: Dict[str, Any], fallback_make: Optional[str] = None, fallback_model: Optional[str] = None, fallback_year: Optional[int] = None) -> Dict[str, Any]:
-    """Normalizes raw NHTSA JSON record into a standardized dictionary with Year/Make/Model and OEM action numbers."""
-    raw_date = r.get("ReportReceivedDate") or r.get("reportReceivedDate")
-    raw_make = r.get("Make") or r.get("make") or fallback_make
-    raw_model = r.get("Model") or r.get("model") or fallback_model
-    raw_year = r.get("ModelYear") or r.get("modelYear") or fallback_year
-
-    parsed_year = None
-    if raw_year is not None:
-        try:
-            parsed_year = int(str(raw_year).strip())
-        except (ValueError, TypeError):
-            parsed_year = raw_year
-
-    return {
-        "nhtsa_campaign_number": r.get("NHTSACampaignNumber") or r.get("nhtsaCampaignNumber"),
-        "mfr_recall_number": r.get("ManufacturerCampaignNumber") or r.get("manufacturerCampaignNumber") or r.get("mfrRecallNumber"),
-        "tsa_action_number": r.get("TSAActionNumber") or r.get("tsaActionNumber"),
-        "make": str(raw_make).upper() if raw_make else None,
-        "model": str(raw_model).title() if raw_model else None,
-        "year": parsed_year,
-        "recall_date": parse_nhtsa_date(raw_date),
-        "component": r.get("Component") or r.get("component"),
-        "summary": r.get("Summary") or r.get("summary"),
-        "consequence": r.get("Conequence") or r.get("consequence"),
-        "remedy": r.get("Remedy") or r.get("remedy"),
-        "notes": r.get("Notes") or r.get("notes"),
-        "park_it": bool(r.get("parkIt") or r.get("ParkIt") or False),
-        "park_outside": bool(r.get("parkOutSide") or r.get("ParkOutside") or r.get("parkOutside") or False),
-        "over_the_air_update": bool(r.get("overTheAirUpdate") or r.get("OverTheAirUpdate") or False)
-    }
-
-def fetch_vehicle_recalls(make: str, model: str, year: int) -> List[Dict[str, Any]]:
-    """Fetches and caches recalls for a specific make/model/year."""
-    cache_key = f"{make.strip().upper()}|{model.strip().lower()}|{year}"
-    now = time.time()
-    
-    if cache_key in RECALL_CACHE and (now - RECALL_CACHE[cache_key]["time"]) < CACHE_TTL_SECONDS:
-        return RECALL_CACHE[cache_key]["data"]
-
+# -------------------------------------------------------------------
+# Database Recall Sync Helper
+# -------------------------------------------------------------------
+def sync_vehicle_recalls_from_api(db: Session, make: str, model: str, year: int) -> List[Dict[str, Any]]:
+    """Calls NHTSA, writes to local DB tables, updates sync status, and returns list."""
     url = f"https://api.nhtsa.gov/recalls/recallsByVehicle?make={make}&model={model}&modelYear={year}"
     response = requests.get(url, timeout=10)
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail="NHTSA Recalls API request failed.")
     
     raw_results = response.json().get("results", [])
-    formatted = [format_recall_item(r, fallback_make=make, fallback_model=model, fallback_year=year) for r in raw_results]
-    
-    RECALL_CACHE[cache_key] = {"time": now, "data": formatted}
-    return formatted
+    formatted_recalls = []
 
-def run_batch_recall_logic(
-    vin_list: List[str], 
-    since_date: Optional[str] = None, 
-    only_critical: bool = False
-) -> Dict[str, Any]:
-    """Shared execution engine for batch recall queries."""
-    results: List[Dict[str, Any]] = []
-    decoded_vehicles: Dict[str, Dict[str, Any]] = {}
-    unique_groups: Dict[tuple, List[str]] = {}
-
-    for raw_vin in vin_list:
-        v = raw_vin.strip().strip('"').strip("'").upper()
-        if not v:
-            continue
-        if len(v) != 17:
-            decoded_vehicles[v] = {"status": "error", "message": "Invalid VIN length (must be 17 characters)"}
-            continue
-        try:
-            vehicle = vin_decoder.decode(v)
-            make = getattr(vehicle, "make", None)
-            model = getattr(vehicle, "model", None)
-            year = getattr(vehicle, "year", None)
-
-            if not make or not model or not year:
-                decoded_vehicles[v] = {"status": "error", "message": "Could not decode vehicle metadata from VIN"}
-                continue
-
-            group_key = (str(make).upper(), str(model).lower(), int(year))
-            decoded_vehicles[v] = {
-                "status": "success",
-                "make": str(make).upper(),
-                "model": str(model).title(),
-                "year": int(year),
-                "group_key": group_key
-            }
-            unique_groups.setdefault(group_key, []).append(v)
-        except Exception as e:
-            decoded_vehicles[v] = {"status": "error", "message": f"Decode error: {str(e)}"}
-
-    # Fetch recalls ONCE per unique vehicle group
-    group_recalls: Dict[tuple, List[Dict[str, Any]]] = {}
-    for (make, model, year) in unique_groups.keys():
-        try:
-            group_recalls[(make, model, year)] = fetch_vehicle_recalls(make, model, year)
-        except Exception:
-            group_recalls[(make, model, year)] = []
-
-    # Assemble response
-    for raw_vin in vin_list:
-        v = raw_vin.strip().strip('"').strip("'").upper()
-        if not v:
-            continue
-        v_data = decoded_vehicles.get(v, {"status": "error", "message": "Unknown error"})
-
-        if v_data["status"] != "success":
-            results.append({
-                "vin": v,
-                "status": "error",
-                "message": v_data["message"]
-            })
+    for r in raw_results:
+        c_num = (r.get("NHTSACampaignNumber") or r.get("nhtsaCampaignNumber") or "").strip().upper()
+        if not c_num:
             continue
 
-        raw_list = group_recalls.get(v_data["group_key"], [])
-        filtered_recalls = []
-        for r in raw_list:
-            if since_date and r.get("recall_date") and r["recall_date"] < since_date:
-                continue
-            if only_critical and not (r.get("park_it") or r.get("park_outside")):
-                continue
-            filtered_recalls.append(r)
+        raw_date = r.get("ReportReceivedDate") or r.get("reportReceivedDate")
+        parsed_date = parse_nhtsa_date(raw_date)
 
-        results.append({
-            "vin": v,
-            "status": "success",
-            "make": v_data["make"],
-            "model": v_data["model"],
-            "year": v_data["year"],
-            "total_recalls": len(filtered_recalls),
-            "recalls": filtered_recalls
+        campaign = db.scalar(select(RecallCampaign).where(RecallCampaign.campaign_number == c_num))
+        if not campaign:
+            campaign = RecallCampaign(
+                campaign_number=c_num,
+                mfr_recall_number=r.get("ManufacturerCampaignNumber") or r.get("manufacturerCampaignNumber") or r.get("mfrRecallNumber"),
+                tsa_action_number=r.get("TSAActionNumber") or r.get("tsaActionNumber"),
+                recall_date=parsed_date,
+                component=r.get("Component") or r.get("component"),
+                summary=r.get("Summary") or r.get("summary"),
+                consequence=r.get("Conequence") or r.get("consequence"),
+                remedy=r.get("Remedy") or r.get("remedy"),
+                notes=r.get("Notes") or r.get("notes"),
+                park_it=bool(r.get("parkIt") or r.get("ParkIt") or False),
+                park_outside=bool(r.get("parkOutSide") or r.get("ParkOutside") or r.get("parkOutside") or False),
+                over_the_air_update=bool(r.get("overTheAirUpdate") or r.get("OverTheAirUpdate") or False)
+            )
+            db.add(campaign)
+            db.flush()
+
+        assoc = db.scalar(
+            select(CampaignVehicleAssociation).where(
+                CampaignVehicleAssociation.campaign_number == c_num,
+                CampaignVehicleAssociation.make == make.upper(),
+                CampaignVehicleAssociation.model == model.lower(),
+                CampaignVehicleAssociation.year == int(year)
+            )
+        )
+        if not assoc:
+            db.add(CampaignVehicleAssociation(
+                campaign_number=c_num,
+                make=make.upper(),
+                model=model.lower(),
+                year=int(year)
+            ))
+
+        formatted_recalls.append({
+            "nhtsa_campaign_number": campaign.campaign_number,
+            "mfr_recall_number": campaign.mfr_recall_number,
+            "tsa_action_number": campaign.tsa_action_number,
+            "make": make.upper(),
+            "model": model.title(),
+            "year": int(year),
+            "recall_date": campaign.recall_date,
+            "component": campaign.component,
+            "summary": campaign.summary,
+            "consequence": campaign.consequence,
+            "remedy": campaign.remedy,
+            "notes": campaign.notes,
+            "park_it": campaign.park_it,
+            "park_outside": campaign.park_outside,
+            "over_the_air_update": campaign.over_the_air_update
         })
 
-    return {
-        "total_queried": len(results),
-        "unique_vehicle_types": len(unique_groups),
-        "results": results
-    }
+    profile = db.scalar(
+        select(VehicleSyncProfile).where(
+            VehicleSyncProfile.make == make.upper(),
+            VehicleSyncProfile.model == model.lower(),
+            VehicleSyncProfile.year == int(year)
+        )
+    )
+    if not profile:
+        profile = VehicleSyncProfile(make=make.upper(), model=model.lower(), year=int(year))
+        db.add(profile)
+    profile.last_synced_at = datetime.utcnow()
+
+    db.commit()
+    return formatted_recalls
+
+def fetch_local_or_sync_recalls(db: Session, make: str, model: str, year: int) -> List[Dict[str, Any]]:
+    """Checks DB for cached recalls; fetches from NHTSA on a miss."""
+    profile = db.scalar(
+        select(VehicleSyncProfile).where(
+            VehicleSyncProfile.make == make.upper(),
+            VehicleSyncProfile.model == model.lower(),
+            VehicleSyncProfile.year == int(year)
+        )
+    )
+    
+    if profile and profile.last_synced_at:
+        query = (
+            select(RecallCampaign)
+            .join(CampaignVehicleAssociation)
+            .where(
+                CampaignVehicleAssociation.make == make.upper(),
+                CampaignVehicleAssociation.model == model.lower(),
+                CampaignVehicleAssociation.year == int(year)
+            )
+        )
+        results = db.scalars(query).all()
+        return [{
+            "nhtsa_campaign_number": c.campaign_number,
+            "mfr_recall_number": c.mfr_recall_number,
+            "tsa_action_number": c.tsa_action_number,
+            "make": make.upper(),
+            "model": model.title(),
+            "year": int(year),
+            "recall_date": c.recall_date,
+            "component": c.component,
+            "summary": c.summary,
+            "consequence": c.consequence,
+            "remedy": c.remedy,
+            "notes": c.notes,
+            "park_it": c.park_it,
+            "park_outside": c.park_outside,
+            "over_the_air_update": c.over_the_air_update
+        } for c in results]
+
+    return sync_vehicle_recalls_from_api(db, make, model, year)
 
 # -------------------------------------------------------------------
 # Pydantic Schemas
@@ -240,28 +232,21 @@ class BatchRecallRequest(BaseModel):
     only_critical: bool = Field(False, description="Include only Park It / Park Outside critical safety recalls")
 
 # -------------------------------------------------------------------
-# Health Checks
+# System Probes
 # -------------------------------------------------------------------
 @app.get("/", tags=["System Probes"])
 def root_status():
-    """Basic service identifier probe."""
     return {"status": "ok", "service": "nhtsa-diagnostics-api"}
 
 @app.get("/health", tags=["System Probes"])
 def health_check():
-    """Health status probe for reverse proxies and orchestrators."""
     return {"status": "healthy"}
 
 # -------------------------------------------------------------------
-# 1. Vehicle Dropdown Lookup Endpoints (Open Vehicle DB)
+# 1. Vehicle Dropdown Lookup Endpoints
 # -------------------------------------------------------------------
 @app.get("/api/vehicles/years", tags=["Vehicle Dropdown Lookups"])
 def get_vehicle_years():
-    """
-    Returns supported model years (1981 through current/future model year).
-
-    Live example: <a href="/api/vehicles/years" target="_blank"><code>/api/vehicles/years</code></a>
-    """
     current_year = datetime.now().year + 1
     return {
         "min_year": 1981,
@@ -271,19 +256,10 @@ def get_vehicle_years():
 
 @app.get("/api/vehicles/makes", tags=["Vehicle Dropdown Lookups"])
 def get_vehicle_makes(year: int = Query(..., description="Model Year (e.g. 2003, 2024)")):
-    """
-    Returns all makes available for a given model year.
-
-    Live example: <a href="/api/vehicles/makes?year=2003" target="_blank"><code>/api/vehicles/makes?year=2003</code></a>
-    """
     try:
         makes = vehicle_client.list_makes_for_year(year)
         make_names = sorted([getattr(m, "make_name", str(m)) for m in makes])
-        return {
-            "year": year,
-            "total_makes": len(make_names),
-            "makes": make_names
-        }
+        return {"year": year, "total_makes": len(make_names), "makes": make_names}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading vehicle makes: {str(e)}")
 
@@ -292,20 +268,10 @@ def get_vehicle_models(
     year: int = Query(..., description="Model Year (e.g. 2003, 2024)"),
     make: str = Query(..., description="Make Name (e.g. Mazda, Toyota, Tesla)")
 ):
-    """
-    Returns all models for a specific year and make.
-
-    Live example: <a href="/api/vehicles/models?year=2003&make=Mazda" target="_blank"><code>/api/vehicles/models?year=2003&make=Mazda</code></a>
-    """
     try:
         models = vehicle_client.list_models_for_year_make(year=year, make_name=make.strip())
         model_names = sorted([getattr(m, "model_name", str(m)) for m in models])
-        return {
-            "year": year,
-            "make": make,
-            "total_models": len(model_names),
-            "models": model_names
-        }
+        return {"year": year, "make": make, "total_models": len(model_names), "models": model_names}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading vehicle models: {str(e)}")
 
@@ -315,32 +281,21 @@ def get_vehicle_styles(
     make: str = Query(..., description="Make Name (e.g. Mazda, Toyota)"),
     model: str = Query(..., description="Model Name (e.g. Protege, Camry)")
 ):
-    """
-    Returns all styles/trims for a specific year, make, and model.
-
-    Live example: <a href="/api/vehicles/styles?year=2003&make=Mazda&model=Protege" target="_blank"><code>/api/vehicles/styles?year=2003&make=Mazda&model=Protege</code></a>
-    """
     try:
         styles = vehicle_client.list_styles_for_year_make_model(year=year, make=make.strip(), model=model.strip())
         style_names = [getattr(s, "style_name", str(s)) for s in styles]
-        return {
-            "year": year,
-            "make": make,
-            "model": model,
-            "total_styles": len(style_names),
-            "styles": style_names
-        }
+        return {"year": year, "make": make, "model": model, "total_styles": len(style_names), "styles": style_names}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading vehicle styles: {str(e)}")
 
 # -------------------------------------------------------------------
-# 2. VIN Decoder Endpoint
+# 2. VIN Decoder Endpoint (Database First)
 # -------------------------------------------------------------------
 @app.get("/api/decode/{vin}", tags=["VIN Decoder"])
-def decode_vin(vin: str):
+def decode_vin(vin: str, db: Session = Depends(get_db)):
     """
-    Decodes a 17-character VIN using the live NHTSA vPIC API with offline WMI fallback.
-    Returns core vehicle metadata and all available technical specifications.
+    Decodes a 17-character VIN.
+    Checks the local database first; falls back to NHTSA vPIC + offline WMI on a miss.
 
     Live example: <a href="/api/decode/5YJSA1E26EF000001" target="_blank"><code>/api/decode/5YJSA1E26EF000001</code></a>
     """
@@ -348,21 +303,45 @@ def decode_vin(vin: str):
     if len(vin) != 17:
         raise HTTPException(status_code=400, detail="Invalid VIN length. VIN must be exactly 17 characters.")
     
+    cached = db.get(DecodedVIN, vin)
+    if cached:
+        return {
+            "vin": cached.vin,
+            "year": cached.year,
+            "make": cached.make,
+            "model": cached.model,
+            "trim": cached.trim,
+            "body_class": cached.body_class,
+            "specifications": cached.specifications or {},
+            "source": "local_database"
+        }
+
     try:
         vehicle = vin_decoder.decode(vin)
-        
         specs: Dict[str, Any] = {}
         for attr, val in vars(vehicle).items():
             if val is not None and attr not in ["vin", "year", "make", "model", "trim", "body_class"]:
                 specs[attr] = val
 
+        decoded_record = DecodedVIN(
+            vin=vin,
+            year=getattr(vehicle, "year", None),
+            make=getattr(vehicle, "make", None),
+            model=getattr(vehicle, "model", None),
+            trim=getattr(vehicle, "trim", None),
+            body_class=getattr(vehicle, "body_class", None),
+            specifications=specs
+        )
+        db.add(decoded_record)
+        db.commit()
+
         return {
             "vin": vin,
-            "year": getattr(vehicle, "year", None),
-            "make": getattr(vehicle, "make", None),
-            "model": getattr(vehicle, "model", None),
-            "trim": getattr(vehicle, "trim", None),
-            "body_class": getattr(vehicle, "body_class", None),
+            "year": decoded_record.year,
+            "make": decoded_record.make,
+            "model": decoded_record.model,
+            "trim": decoded_record.trim,
+            "body_class": decoded_record.body_class,
             "specifications": specs,
             "source": "nhtsa_vpic"
         }
@@ -382,17 +361,41 @@ def decode_vin(vin: str):
         }
 
 # -------------------------------------------------------------------
-# 3. Safety Recalls Endpoints (Vehicle, Campaign, Batch)
+# 3. Safety Recalls Endpoints (Database First)
 # -------------------------------------------------------------------
 @app.get("/api/recalls/campaign/{campaign_number}", tags=["Safety Recalls"])
-def get_recall_by_campaign(campaign_number: str):
+def get_recall_by_campaign(campaign_number: str, db: Session = Depends(get_db)):
     """
-    Looks up a specific safety recall campaign by its unique NHTSA Campaign Number.
-    Returns campaign details along with an array of all affected vehicle makes, models, and years.
+    Looks up a safety recall campaign by NHTSA Campaign Number.
+    Checks local DB first; falls back to NHTSA on a miss.
 
     Live example: <a href="/api/recalls/campaign/17V260000" target="_blank"><code>/api/recalls/campaign/17V260000</code></a>
     """
     c_num = campaign_number.strip().upper()
+
+    cached_campaign = db.scalar(select(RecallCampaign).where(RecallCampaign.campaign_number == c_num))
+    if cached_campaign and cached_campaign.affected_vehicles:
+        return {
+            "campaign_number": cached_campaign.campaign_number,
+            "mfr_recall_number": cached_campaign.mfr_recall_number,
+            "tsa_action_number": cached_campaign.tsa_action_number,
+            "recall_date": cached_campaign.recall_date,
+            "component": cached_campaign.component,
+            "summary": cached_campaign.summary,
+            "consequence": cached_campaign.consequence,
+            "remedy": cached_campaign.remedy,
+            "notes": cached_campaign.notes,
+            "park_it": cached_campaign.park_it,
+            "park_outside": cached_campaign.park_outside,
+            "over_the_air_update": cached_campaign.over_the_air_update,
+            "total_affected_models": len(cached_campaign.affected_vehicles),
+            "affected_vehicles": [
+                {"make": v.make, "model": v.model.title(), "year": v.year}
+                for v in cached_campaign.affected_vehicles
+            ],
+            "source": "local_database"
+        }
+
     url = f"https://api.nhtsa.gov/recalls/campaignNumber?campaignNumber={c_num}"
     try:
         response = requests.get(url, timeout=10)
@@ -403,54 +406,78 @@ def get_recall_by_campaign(campaign_number: str):
         if not raw_results:
             raise HTTPException(status_code=404, detail=f"No recall found matching campaign number '{c_num}'.")
         
-        first_record = raw_results[0]
-        raw_date = first_record.get("ReportReceivedDate") or first_record.get("reportReceivedDate")
+        first = raw_results[0]
+        raw_date = first.get("ReportReceivedDate") or first.get("reportReceivedDate")
 
-        affected_vehicles = []
-        seen_vehicles = set()
+        if not cached_campaign:
+            cached_campaign = RecallCampaign(
+                campaign_number=c_num,
+                mfr_recall_number=first.get("ManufacturerCampaignNumber") or first.get("manufacturerCampaignNumber") or first.get("mfrRecallNumber"),
+                tsa_action_number=first.get("TSAActionNumber") or first.get("tsaActionNumber"),
+                recall_date=parse_nhtsa_date(raw_date),
+                component=first.get("Component") or first.get("component"),
+                summary=first.get("Summary") or first.get("summary"),
+                consequence=first.get("Conequence") or first.get("consequence"),
+                remedy=first.get("Remedy") or first.get("remedy"),
+                notes=first.get("Notes") or first.get("notes"),
+                park_it=bool(first.get("parkIt") or first.get("ParkIt") or False),
+                park_outside=bool(first.get("parkOutSide") or first.get("ParkOutside") or first.get("parkOutside") or False),
+                over_the_air_update=bool(first.get("overTheAirUpdate") or first.get("OverTheAirUpdate") or False)
+            )
+            db.add(cached_campaign)
+            db.flush()
 
+        affected = []
+        seen = set()
         for r in raw_results:
             v_make = str(r.get("Make") or r.get("make") or "").upper()
-            v_model = str(r.get("Model") or r.get("model") or "").title()
+            v_model = str(r.get("Model") or r.get("model") or "").strip().lower()
             raw_y = r.get("ModelYear") or r.get("modelYear")
-            
-            v_year = None
-            if raw_y is not None:
-                try:
-                    v_year = int(str(raw_y).strip())
-                except (ValueError, TypeError):
-                    v_year = raw_y
+            try:
+                v_year = int(str(raw_y).strip())
+            except Exception:
+                continue
 
-            vehicle_tuple = (v_make, v_model, v_year)
-            if vehicle_tuple not in seen_vehicles and any(vehicle_tuple):
-                seen_vehicles.add(vehicle_tuple)
-                affected_vehicles.append({
-                    "make": v_make if v_make else None,
-                    "model": v_model if v_model else None,
-                    "year": v_year
-                })
+            v_key = (v_make, v_model, v_year)
+            if v_key not in seen and any(v_key):
+                seen.add(v_key)
+                existing = db.scalar(
+                    select(CampaignVehicleAssociation).where(
+                        CampaignVehicleAssociation.campaign_number == c_num,
+                        CampaignVehicleAssociation.make == v_make,
+                        CampaignVehicleAssociation.model == v_model,
+                        CampaignVehicleAssociation.year == v_year
+                    )
+                )
+                if not existing:
+                    db.add(CampaignVehicleAssociation(
+                        campaign_number=c_num, make=v_make, model=v_model, year=v_year
+                    ))
+                affected.append({"make": v_make, "model": v_model.title(), "year": v_year})
+
+        db.commit()
 
         return {
             "campaign_number": c_num,
-            "mfr_recall_number": first_record.get("ManufacturerCampaignNumber") or first_record.get("manufacturerCampaignNumber") or first_record.get("mfrRecallNumber"),
-            "tsa_action_number": first_record.get("TSAActionNumber") or first_record.get("tsaActionNumber"),
-            "recall_date": parse_nhtsa_date(raw_date),
-            "component": first_record.get("Component") or first_record.get("component"),
-            "summary": first_record.get("Summary") or first_record.get("summary"),
-            "consequence": first_record.get("Conequence") or first_record.get("consequence"),
-            "remedy": first_record.get("Remedy") or first_record.get("remedy"),
-            "notes": first_record.get("Notes") or first_record.get("notes"),
-            "park_it": bool(first_record.get("parkIt") or first_record.get("ParkIt") or False),
-            "park_outside": bool(first_record.get("parkOutSide") or first_record.get("ParkOutside") or first_record.get("parkOutside") or False),
-            "over_the_air_update": bool(first_record.get("overTheAirUpdate") or first_record.get("OverTheAirUpdate") or False),
-            "total_affected_models": len(affected_vehicles),
-            "affected_vehicles": affected_vehicles
+            "mfr_recall_number": cached_campaign.mfr_recall_number,
+            "tsa_action_number": cached_campaign.tsa_action_number,
+            "recall_date": cached_campaign.recall_date,
+            "component": cached_campaign.component,
+            "summary": cached_campaign.summary,
+            "consequence": cached_campaign.consequence,
+            "remedy": cached_campaign.remedy,
+            "notes": cached_campaign.notes,
+            "park_it": cached_campaign.park_it,
+            "park_outside": cached_campaign.park_outside,
+            "over_the_air_update": cached_campaign.over_the_air_update,
+            "total_affected_models": len(affected),
+            "affected_vehicles": affected,
+            "source": "nhtsa_live"
         }
     except HTTPException:
         raise
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
-
 
 @app.get("/api/recalls", tags=["Safety Recalls"])
 def get_recalls(
@@ -459,113 +486,271 @@ def get_recalls(
     model: Optional[str] = Query(None, description="Vehicle Model (e.g., Model S, Accord)"),
     year: Optional[int] = Query(None, description="Model Year (e.g., 2014, 2023)"),
     since_date: Optional[str] = Query(None, description="Filter recalls on/after this date (YYYY-MM-DD)"),
-    only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only")
+    only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only"),
+    db: Session = Depends(get_db)
 ):
     """
     Queries safety recalls for a vehicle via **VIN** OR **Make/Model/Year**.
+    Checks the local database before making an external call.
 
     Live examples:
     * Query by VIN: <a href="/api/recalls?vin=5YJSA1E26EF000001" target="_blank"><code>/api/recalls?vin=5YJSA1E26EF000001</code></a>
     * Query by Make/Model/Year: <a href="/api/recalls?make=tesla&model=model%20s&year=2014" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014</code></a>
-    * Query with date filter: <a href="/api/recalls?make=tesla&model=model%20s&year=2014&since_date=2020-01-01" target="_blank"><code>/api/recalls?make=tesla&model=model%20s&year=2014&since_date=2020-01-01</code></a>
     """
     if vin:
         vin = vin.strip().upper()
         if len(vin) != 17:
             raise HTTPException(status_code=400, detail="Invalid VIN length. Must be 17 characters.")
-        try:
-            vehicle = vin_decoder.decode(vin)
-            make = getattr(vehicle, "make", None)
-            model = getattr(vehicle, "model", None)
-            year = getattr(vehicle, "year", None)
-            
-            if not make or not model or not year:
-                raise HTTPException(status_code=422, detail="Could not resolve Make, Model, or Year from VIN.")
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to resolve VIN for recall check: {str(e)}")
+        
+        cached_vin = db.get(DecodedVIN, vin)
+        if cached_vin:
+            make, model, year = cached_vin.make, cached_vin.model, cached_vin.year
+        else:
+            try:
+                vehicle = vin_decoder.decode(vin)
+                make = getattr(vehicle, "make", None)
+                model = getattr(vehicle, "model", None)
+                year = getattr(vehicle, "year", None)
+                if not make or not model or not year:
+                    raise HTTPException(status_code=422, detail="Could not resolve Make, Model, or Year from VIN.")
+                
+                db.add(DecodedVIN(
+                    vin=vin, year=int(year), make=str(make).upper(), model=str(model).title(),
+                    trim=getattr(vehicle, "trim", None), body_class=getattr(vehicle, "body_class", None)
+                ))
+                db.commit()
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Failed to resolve VIN: {str(e)}")
 
     if not make or not model or not year:
-        raise HTTPException(
-            status_code=400, 
-            detail="Provide either 'vin' OR all three of ('make', 'model', 'year')."
+        raise HTTPException(status_code=400, detail="Provide either 'vin' OR all three of ('make', 'model', 'year').")
+
+    had_profile = db.scalar(
+        select(VehicleSyncProfile).where(
+            VehicleSyncProfile.make == str(make).upper(),
+            VehicleSyncProfile.model == str(model).lower(),
+            VehicleSyncProfile.year == int(year)
         )
+    )
 
-    try:
-        raw_recalls = fetch_vehicle_recalls(make=make, model=model, year=int(year))
-        recalls = []
-        for r in raw_recalls:
-            if since_date and r.get("recall_date") and r["recall_date"] < since_date:
-                continue
-            if only_critical and not (r.get("park_it") or r.get("park_outside")):
-                continue
-            recalls.append(r)
+    raw_recalls = fetch_local_or_sync_recalls(db, str(make), str(model), int(year))
+    filtered = []
+    for r in raw_recalls:
+        if since_date and r.get("recall_date") and r["recall_date"] < since_date:
+            continue
+        if only_critical and not (r.get("park_it") or r.get("park_outside")):
+            continue
+        filtered.append(r)
 
-        return {
-            "query_vin": vin if vin else None,
-            "make": str(make).upper(),
-            "model": str(model).title(),
-            "year": int(year),
-            "total_recalls": len(recalls),
-            "recalls": recalls
-        }
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"NHTSA Recalls API connection error: {str(e)}")
-
+    return {
+        "query_vin": vin if vin else None,
+        "make": str(make).upper(),
+        "model": str(model).title(),
+        "year": int(year),
+        "total_recalls": len(filtered),
+        "source": "local_database" if (had_profile and had_profile.last_synced_at) else "nhtsa_live",
+        "recalls": filtered
+    }
 
 @app.get("/api/recalls/batch", tags=["Safety Recalls"])
 def get_batch_recalls_query(
-    vins: str = Query(..., description="Comma-separated list of VINs (e.g., 5YJSA1E26EF000001, 1HGCM82633A004352)"),
+    vins: str = Query(..., description="Comma-separated list of VINs"),
     since_date: Optional[str] = Query(None, description="Filter recalls on/after this date (YYYY-MM-DD)"),
-    only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only")
+    only_critical: bool = Query(False, description="Filter for Park It / Park Outside warnings only"),
+    db: Session = Depends(get_db)
 ):
     """
     Checks recalls for multiple fleet vehicles using URL query parameters.
-    Only issues one external request per unique vehicle make/model/year group.
-
-    Live example: <a href="/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01" target="_blank"><code>/api/recalls/batch?vins=5YJSA1E26EF000001,1HGCM82633A004352&since_date=2020-01-01</code></a>
     """
     vin_list = [v.strip() for v in vins.split(",") if v.strip()]
-    return run_batch_recall_logic(vin_list, since_date=since_date, only_critical=only_critical)
-
+    return process_batch(vin_list, since_date, only_critical, db)
 
 @app.post("/api/recalls/batch", tags=["Safety Recalls"])
-def get_batch_recalls_json(payload: BatchRecallRequest):
+def get_batch_recalls_json(payload: BatchRecallRequest, db: Session = Depends(get_db)):
     """
     Checks recalls for multiple fleet vehicles using a JSON request body.
-    Only issues one external request per unique vehicle make/model/year group.
     """
-    return run_batch_recall_logic(payload.vins, since_date=payload.since_date, only_critical=payload.only_critical)
+    return process_batch(payload.vins, payload.since_date, payload.only_critical, db)
+
+def process_batch(vin_list: List[str], since_date: Optional[str], only_critical: bool, db: Session):
+    results = []
+    for raw_vin in vin_list:
+        v = raw_vin.strip().strip('"').strip("'").upper()
+        if len(v) != 17:
+            results.append({"vin": v, "status": "error", "message": "Invalid VIN length"})
+            continue
+        
+        cached_vin = db.get(DecodedVIN, v)
+        if cached_vin:
+            make, model, year = cached_vin.make, cached_vin.model, cached_vin.year
+        else:
+            try:
+                vehicle = vin_decoder.decode(v)
+                make, model, year = getattr(vehicle, "make", None), getattr(vehicle, "model", None), getattr(vehicle, "year", None)
+                if not make or not model or not year:
+                    results.append({"vin": v, "status": "error", "message": "Could not resolve metadata"})
+                    continue
+                db.add(DecodedVIN(
+                    vin=v, year=int(year), make=str(make).upper(), model=str(model).title(),
+                    trim=getattr(vehicle, "trim", None), body_class=getattr(vehicle, "body_class", None)
+                ))
+                db.commit()
+            except Exception as e:
+                results.append({"vin": v, "status": "error", "message": str(e)})
+                continue
+
+        had_profile = db.scalar(
+            select(VehicleSyncProfile).where(
+                VehicleSyncProfile.make == str(make).upper(),
+                VehicleSyncProfile.model == str(model).lower(),
+                VehicleSyncProfile.year == int(year)
+            )
+        )
+
+        raw = fetch_local_or_sync_recalls(db, str(make), str(model), int(year))
+        filtered = [
+            r for r in raw
+            if not (since_date and r.get("recall_date") and r["recall_date"] < since_date)
+            and not (only_critical and not (r.get("park_it") or r.get("park_outside")))
+        ]
+        results.append({
+            "vin": v,
+            "status": "success",
+            "make": str(make).upper(),
+            "model": str(model).title(),
+            "year": int(year),
+            "total_recalls": len(filtered),
+            "source": "local_database" if (had_profile and had_profile.last_synced_at) else "nhtsa_live",
+            "recalls": filtered
+        })
+
+    return {"total_queried": len(results), "results": results}
 
 # -------------------------------------------------------------------
-# 4. OBD-II DTC Lookup Endpoint (Thread-Safe)
+# 4. Database Management & Admin Endpoints
+# -------------------------------------------------------------------
+@app.get("/api/admin/db/stats", tags=["Database Management"])
+def get_database_stats(db: Session = Depends(get_db)):
+    """
+    Returns total record counts across all persistent SQLite / Postgres tables.
+
+    Live example: <a href="/api/admin/db/stats" target="_blank"><code>/api/admin/db/stats</code></a>
+    """
+    total_vins = db.query(DecodedVIN).count()
+    total_profiles = db.query(VehicleSyncProfile).count()
+    total_campaigns = db.query(RecallCampaign).count()
+    total_associations = db.query(CampaignVehicleAssociation).count()
+
+    return {
+        "database_engine": database.DATABASE_URL.split(":///")[0],
+        "tables": {
+            "decoded_vins": total_vins,
+            "tracked_vehicle_profiles": total_profiles,
+            "saved_recall_campaigns": total_campaigns,
+            "campaign_vehicle_associations": total_associations
+        }
+    }
+
+@app.get("/api/admin/db/tracked-vehicles", tags=["Database Management"])
+def list_tracked_vehicles(db: Session = Depends(get_db)):
+    """
+    Lists all unique vehicle specifications currently scheduled for nightly cron sync.
+
+    Live example: <a href="/api/admin/db/tracked-vehicles" target="_blank"><code>/api/admin/db/tracked-vehicles</code></a>
+    """
+    profiles = db.scalars(select(VehicleSyncProfile).order_by(VehicleSyncProfile.make)).all()
+    return {
+        "total_tracked": len(profiles),
+        "vehicles": [
+            {
+                "id": p.id,
+                "make": p.make,
+                "model": p.model.title(),
+                "year": p.year,
+                "last_synced_at": p.last_synced_at.isoformat() if p.last_synced_at else None
+            }
+            for p in profiles
+        ]
+    }
+
+@app.get("/api/admin/db/vins", tags=["Database Management"])
+def list_saved_vins(limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db)):
+    """
+    Lists stored VINs and vehicle summaries currently saved in the database.
+
+    Live example: <a href="/api/admin/db/vins" target="_blank"><code>/api/admin/db/vins</code></a>
+    """
+    vins = db.scalars(select(DecodedVIN).order_by(DecodedVIN.created_at.desc()).limit(limit)).all()
+    return {
+        "count": len(vins),
+        "vins": [
+            {
+                "vin": v.vin,
+                "year": v.year,
+                "make": v.make,
+                "model": v.model,
+                "created_at": v.created_at.isoformat() if v.created_at else None
+            }
+            for v in vins
+        ]
+    }
+
+@app.delete("/api/admin/db/recalls", tags=["Database Management"])
+def purge_vehicle_recalls(
+    make: str = Query(..., description="Make Name (e.g. Tesla)"),
+    model: str = Query(..., description="Model Name (e.g. Model S)"),
+    year: int = Query(..., description="Model Year (e.g. 2014)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Removes cached recall records and sync tracking for a vehicle to force an upstream NHTSA re-fetch.
+    """
+    m, mod, y = make.strip().upper(), model.strip().lower(), int(year)
+    
+    assocs = db.scalars(
+        select(CampaignVehicleAssociation).where(
+            CampaignVehicleAssociation.make == m,
+            CampaignVehicleAssociation.model == mod,
+            CampaignVehicleAssociation.year == y
+        )
+    ).all()
+    
+    for a in assocs:
+        db.delete(a)
+
+    profile = db.scalar(
+        select(VehicleSyncProfile).where(
+            VehicleSyncProfile.make == m,
+            VehicleSyncProfile.model == mod,
+            VehicleSyncProfile.year == y
+        )
+    )
+    if profile:
+        db.delete(profile)
+
+    db.commit()
+    return {
+        "status": "purged",
+        "vehicle": f"{y} {m} {mod.title()}",
+        "associations_removed": len(assocs)
+    }
+
+# -------------------------------------------------------------------
+# 5. OBD-II DTC Lookup Endpoint
 # -------------------------------------------------------------------
 @app.get("/api/dtc/{code}", tags=["OBD-II Diagnostics"])
 def get_dtc(
     code: str, 
     manufacturer: Optional[str] = Query(None, description="Optional OEM filter (e.g. FORD, GM, HONDA)")
 ):
-    """
-    Looks up OBD-II Diagnostic Trouble Code definitions (Powertrain, Chassis, Body, Network).
-    Queries generic SAE J2012 definitions or manufacturer-specific codes offline.
-
-    Live examples:
-    * Generic DTC query: <a href="/api/dtc/P0300" target="_blank"><code>/api/dtc/P0300</code></a>
-    * Manufacturer-specific query: <a href="/api/dtc/P1000?manufacturer=FORD" target="_blank"><code>/api/dtc/P1000?manufacturer=FORD</code></a>
-    """
     code = code.strip().upper()
     try:
         db = get_dtc_instance()
-        
-        dtc_info = None
-        if manufacturer:
-            dtc_info = db.get_dtc(code, manufacturer.strip().upper())
-            
-        if not dtc_info:
+        dtc_info = db.get_dtc(code, manufacturer.strip().upper()) if manufacturer else db.get_dtc(code)
+        if not dtc_info and manufacturer:
             dtc_info = db.get_dtc(code)
-
         if hasattr(db, "close"):
             db.close()
-
         if not dtc_info:
             raise HTTPException(status_code=404, detail=f"DTC code '{code}' not found in database.")
         
