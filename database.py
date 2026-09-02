@@ -1,87 +1,103 @@
-"""
-cron_sync_recalls.py
-
-Queries all unique vehicle makes, models, and years stored in `vehicle_sync_profiles`,
-calls the NHTSA API for each one, and refreshes the local database.
-"""
-
-import time
-import requests
+import os
 from datetime import datetime
-from sqlalchemy import select
-from database import (
-    SessionLocal, VehicleSyncProfile, RecallCampaign,
-    CampaignVehicleAssociation, init_db
+from typing import Optional, List
+from sqlalchemy import (
+    create_engine, String, Integer, Boolean, Text, DateTime, JSON,
+    ForeignKey, UniqueConstraint
+)
+from sqlalchemy.orm import (
+    DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 )
 
-def sync_all_tracked_vehicles():
-    init_db()
+# -------------------------------------------------------------------
+# Connection Setup (Defaults to SQLite; accepts Postgres connection string)
+# -------------------------------------------------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./fleet_data.db")
+
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args["check_same_thread"] = False
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args, echo=False)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+class Base(DeclarativeBase):
+    pass
+
+# -------------------------------------------------------------------
+# Table Models
+# -------------------------------------------------------------------
+class DecodedVIN(Base):
+    __tablename__ = "decoded_vins"
+
+    vin: Mapped[str] = mapped_column(String(17), primary_key=True, index=True)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    make: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    trim: Mapped[Optional[str]] = mapped_column(String(50))
+    body_class: Mapped[Optional[str]] = mapped_column(String(50))
+    specifications: Mapped[Optional[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class VehicleSyncProfile(Base):
+    """Stores unique Year/Make/Model specs queried by the API to drive cron jobs."""
+    __tablename__ = "vehicle_sync_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    make: Mapped[str] = mapped_column(String(50), nullable=False)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint("make", "model", "year", name="uq_sync_profile_mmy"),
+    )
+
+class RecallCampaign(Base):
+    __tablename__ = "recall_campaigns"
+
+    campaign_number: Mapped[str] = mapped_column(String(25), primary_key=True, index=True)
+    mfr_recall_number: Mapped[Optional[str]] = mapped_column(String(50))
+    tsa_action_number: Mapped[Optional[str]] = mapped_column(String(50))
+    recall_date: Mapped[Optional[str]] = mapped_column(String(15))
+    component: Mapped[Optional[str]] = mapped_column(Text)
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+    consequence: Mapped[Optional[str]] = mapped_column(Text)
+    remedy: Mapped[Optional[str]] = mapped_column(Text)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    park_it: Mapped[bool] = mapped_column(Boolean, default=False)
+    park_outside: Mapped[bool] = mapped_column(Boolean, default=False)
+    over_the_air_update: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    affected_vehicles: Mapped[List["CampaignVehicleAssociation"]] = relationship(
+        "CampaignVehicleAssociation", back_populates="campaign", cascade="all, delete-orphan"
+    )
+
+class CampaignVehicleAssociation(Base):
+    """Maps which vehicle make, model, and year combinations are affected by a campaign."""
+    __tablename__ = "campaign_vehicle_associations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_number: Mapped[str] = mapped_column(String(25), ForeignKey("recall_campaigns.campaign_number", ondelete="CASCADE"), index=True)
+    make: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    campaign: Mapped["RecallCampaign"] = relationship("RecallCampaign", back_populates="affected_vehicles")
+
+    __table_args__ = (
+        UniqueConstraint("campaign_number", "make", "model", "year", name="uq_camp_vehicle"),
+    )
+
+def init_db():
+    """Initializes tables on startup."""
+    Base.metadata.create_all(bind=engine)
+
+def get_db():
+    """Dependency helper for route handlers."""
     db = SessionLocal()
-
     try:
-        profiles = db.scalars(select(VehicleSyncProfile)).all()
-        print(f"[{datetime.utcnow().isoformat()}] Starting sync for {len(profiles)} tracked vehicle profiles...")
-
-        for profile in profiles:
-            make, model, year = profile.make, profile.model, profile.year
-            print(f"Syncing {year} {make} {model}...")
-
-            url = f"https://api.nhtsa.gov/recalls/recallsByVehicle?make={make}&model={model}&modelYear={year}"
-            try:
-                resp = requests.get(url, timeout=15)
-                if resp.status_code != 200:
-                    print(f"Failed to fetch {year} {make} {model}: HTTP {resp.status_code}")
-                    continue
-
-                raw_results = resp.json().get("results", [])
-                for r in raw_results:
-                    c_num = (r.get("NHTSACampaignNumber") or r.get("nhtsaCampaignNumber") or "").strip().upper()
-                    if not c_num:
-                        continue
-
-                    campaign = db.scalar(select(RecallCampaign).where(RecallCampaign.campaign_number == c_num))
-                    if not campaign:
-                        campaign = RecallCampaign(
-                            campaign_number=c_num,
-                            mfr_recall_number=r.get("ManufacturerCampaignNumber") or r.get("manufacturerCampaignNumber") or r.get("mfrRecallNumber"),
-                            tsa_action_number=r.get("TSAActionNumber") or r.get("tsaActionNumber"),
-                            recall_date=r.get("ReportReceivedDate") or r.get("reportReceivedDate"),
-                            component=r.get("Component") or r.get("component"),
-                            summary=r.get("Summary") or r.get("summary"),
-                            consequence=r.get("Conequence") or r.get("consequence"),
-                            remedy=r.get("Remedy") or r.get("remedy"),
-                            notes=r.get("Notes") or r.get("notes"),
-                            park_it=bool(r.get("parkIt") or r.get("ParkIt") or False),
-                            park_outside=bool(r.get("parkOutSide") or r.get("ParkOutside") or r.get("parkOutside") or False),
-                            over_the_air_update=bool(r.get("overTheAirUpdate") or r.get("OverTheAirUpdate") or False)
-                        )
-                        db.add(campaign)
-                        db.flush()
-
-                    assoc = db.scalar(
-                        select(CampaignVehicleAssociation).where(
-                            CampaignVehicleAssociation.campaign_number == c_num,
-                            CampaignVehicleAssociation.make == make.upper(),
-                            CampaignVehicleAssociation.model == model.lower(),
-                            CampaignVehicleAssociation.year == int(year)
-                        )
-                    )
-                    if not assoc:
-                        db.add(CampaignVehicleAssociation(
-                            campaign_number=c_num, make=make.upper(), model=model.lower(), year=int(year)
-                        ))
-
-                profile.last_synced_at = datetime.utcnow()
-                db.commit()
-                time.sleep(1)  # Respectful pause between NHTSA API calls
-
-            except Exception as e:
-                print(f"Error syncing {year} {make} {model}: {e}")
-                db.rollback()
-
-        print("Recall sync complete.")
+        yield db
     finally:
         db.close()
-
-if __name__ == "__main__":
-    sync_all_tracked_vehicles()
