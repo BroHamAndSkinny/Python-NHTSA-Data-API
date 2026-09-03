@@ -138,6 +138,46 @@ class VehicleComplaint(Base):
         UniqueConstraint("odi_number", name="uq_complaint_odi"),
     )
 
+class VehicleInvestigation(Base):
+    __tablename__ = "vehicle_investigations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nhtsa_action_number: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    make: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    component: Mapped[Optional[str]] = mapped_column(Text)
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+    date_opened: Mapped[Optional[str]] = mapped_column(String(20))
+    date_closed: Mapped[Optional[str]] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("nhtsa_action_number", name="uq_investigation_action_num"),
+    )
+
+class VehicleEPARating(Base):
+    __tablename__ = "vehicle_epa_ratings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    make: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(50), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    epa_vehicle_id: Mapped[Optional[int]] = mapped_column(Integer)
+    fuel_type: Mapped[Optional[str]] = mapped_column(String(50))
+    city_mpg: Mapped[Optional[int]] = mapped_column(Integer)
+    highway_mpg: Mapped[Optional[int]] = mapped_column(Integer)
+    combined_mpg: Mapped[Optional[int]] = mapped_column(Integer)
+    annual_fuel_cost_usd: Mapped[Optional[int]] = mapped_column(Integer)
+    co2_gpm: Mapped[Optional[float]] = mapped_column(JSON)
+    ghg_score: Mapped[Optional[int]] = mapped_column(Integer)
+    raw_epa_data: Mapped[Optional[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("make", "model", "year", name="uq_epa_rating_mmy"),
+    )
+
 def init_db():
     """Initializes tables on startup."""
     Base.metadata.create_all(bind=engine)

@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NHTSA Automotive Data API - Control Center</title>
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0b0f19;
+      --bg-card: rgba(18, 26, 43, 0.75);
+      --bg-card-border: rgba(255, 255, 255, 0.08);
+      --bg-card-hover: rgba(26, 38, 64, 0.85);
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --primary-glow: rgba(99, 102, 241, 0.35);
+      --accent-cyan: #06b6d4;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #f43f5e;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --icon-color: #cbd5e1;
+      --radius-lg: 16px;
+      --radius-md: 10px;
+      --radius-sm: 6px;
+      --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(at 10% 10%, rgba(99, 102, 241, 0.12) 0px, transparent 50%),
+        radial-gradient(at 90% 90%, rgba(6, 182, 212, 0.1) 0px, transparent 50%),
+        radial-gradient(at 50% 50%, rgba(15, 23, 42, 0.6) 0px, transparent 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      line-height: 1.5;
+      padding-bottom: 60px;
+    }
+
+    /* Icon Utility */
+    .icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      stroke: var(--icon-color);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }
+    .icon-lg { width: 24px; height: 24px; }
+    .icon-sm { width: 16px; height: 16px; }
+
+    header {
+      border-bottom: 1px solid var(--bg-card-border);
+      backdrop-filter: blur(12px);
+      background: rgba(11, 15, 25, 0.8);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .header-container {
+      max-width: 1300px;
+      margin: 0 auto;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px var(--primary-glow);
+    }
+    .brand-icon svg { stroke: #818cf8; }
+
+    .brand-title {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+      background: linear-gradient(to right, #ffffff, #cbd5e1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      color: var(--accent-emerald);
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      box-shadow: 0 0 8px var(--accent-emerald);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+
+    .nav-btn {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      padding: 8px 14px;
+      border-radius: var(--radius-md);
+      transition: var(--transition);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .nav-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    main {
+      max-width: 1300px;
+      margin: 32px auto;
+      padding: 0 24px;
+    }
+
+    /* Tab Navigation */
+    .tabs-nav {
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid var(--bg-card-border);
+      margin-bottom: 32px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 0.95rem;
+      font-weight: 500;
+      padding: 12px 20px;
+      border-radius: var(--radius-md) var(--radius-md) 0 0;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: var(--transition);
+      position: relative;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .tab-btn.active {
+      color: #fff;
+      background: rgba(99, 102, 241, 0.12);
+      border-bottom: 2px solid var(--primary);
+    }
+    .tab-btn.active .icon { stroke: var(--primary); }
+
+    .tab-content {
+      display: none;
+      animation: fadeIn 0.3s ease;
+    }
+    .tab-content.active { display: block; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Glass Cards */
+    .glass-card {
+      background: var(--bg-card);
+      border: 1px solid var(--bg-card-border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+      margin-bottom: 24px;
+    }
+
+    .card-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Inputs */
+    .search-bar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    .input-group {
+      flex: 1;
+      min-width: 240px;
+    }
+
+    .form-control {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--bg-card-border);
+      border-radius: var(--radius-md);
+      padding: 12px 16px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.95rem;
+      transition: var(--transition);
+    }
+
+    .form-control:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 15px var(--primary-glow);
+    }
+
+    .btn {
+      background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-md);
+      padding: 12px 24px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: var(--transition);
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(99, 102, 241, 0.4);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--bg-card-border);
+      color: var(--text-main);
+      box-shadow: none;
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.12);
+      box-shadow: none;
+    }
+
+    .chip-container {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .chip-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .chip {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--bg-card-border);
+      color: var(--text-muted);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+    .chip:hover {
+      color: #fff;
+      background: rgba(99, 102, 241, 0.2);
+      border-color: var(--primary);
+    }
+
+    /* Grid Layouts */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+    }
+
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    /* Stat Cards */
+    .stat-card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--bg-card-border);
+      border-radius: var(--radius-md);
+      padding: 16px 18px;
+    }
+
+    .stat-val {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--primary);
+      margin-top: 4px;
+    }
+
+    .stat-val-sm {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #ffffff;
+      margin-top: 4px;
+      line-height: 1.3;
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Dossier Header */
+    .dossier-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--bg-card-border);
+      padding-bottom: 16px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .dossier-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.7rem;
+      font-weight: 700;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-primary { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); }
+    .badge-danger { background: rgba(244, 63, 94, 0.2); color: var(--accent-rose); border: 1px solid rgba(244, 63, 94, 0.3); }
+    .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--accent-emerald); border: 1px solid rgba(16, 185, 129, 0.3); }
+
+    /* Timeline Section (Full Width Row) */
+    .timeline-container {
+      position: relative;
+      padding-left: 24px;
+      margin-top: 16px;
+    }
+    .timeline-container::before {
+      content: '';
+      position: absolute;
+      left: 7px;
+      top: 4px;
+      bottom: 4px;
+      width: 2px;
+      background: var(--bg-card-border);
+    }
+    .timeline-item {
+      position: relative;
+      margin-bottom: 20px;
+    }
+    .timeline-dot {
+      position: absolute;
+      left: -24px;
+      top: 4px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--primary);
+      box-shadow: 0 0 10px var(--primary-glow);
+    }
+    .timeline-dot.recall { background: var(--accent-rose); box-shadow: 0 0 10px rgba(244,63,94,0.4); }
+    .timeline-dot.investigation { background: var(--accent-amber); box-shadow: 0 0 10px rgba(245,158,11,0.4); }
+    .timeline-dot.decoded { background: var(--accent-cyan); box-shadow: 0 0 10px rgba(6,182,212,0.5); }
+
+    .timeline-date {
+      font-size: 0.78rem;
+      color: var(--accent-cyan);
+      font-weight: 600;
+    }
+    .timeline-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .timeline-desc {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    /* Key-Value Spec Tables */
+    .spec-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    .spec-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.88rem;
+    }
+    .spec-table tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.015);
+    }
+    .spec-table .spec-label {
+      color: var(--text-muted);
+      font-weight: 500;
+      width: 40%;
+    }
+    .spec-table .spec-val {
+      color: var(--text-main);
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    /* Recalls Card Styling */
+    .recall-item {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--bg-card-border);
+      border-radius: var(--radius-md);
+      padding: 18px;
+      margin-bottom: 16px;
+      transition: var(--transition);
+    }
+    .recall-item:hover {
+      border-color: rgba(244, 63, 94, 0.4);
+    }
+    .recall-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .recall-campaign {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      color: var(--accent-rose);
+      font-size: 1.05rem;
+    }
+    .recall-body {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    /* Expandable Complaints */
+    .complaint-card {
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--bg-card-border);
+      border-radius: var(--radius-md);
+      padding: 14px 18px;
+      margin-bottom: 12px;
+      transition: var(--transition);
+      cursor: pointer;
+    }
+    .complaint-card:hover {
+      border-color: var(--primary);
+    }
+    .complaint-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .complaint-details {
+      display: none;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--bg-card-border);
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+    .complaint-card.expanded .complaint-details {
+      display: block;
+    }
+
+    /* Component Badges Grid */
+    .component-chips {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 14px 0 20px 0;
+    }
+    .component-chip {
+      background: rgba(99, 102, 241, 0.1);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      color: #818cf8;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .component-chip-count {
+      background: var(--primary);
+      color: #fff;
+      padding: 2px 7px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+    }
+
+    /* Sub-tabs */
+    .sub-tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .sub-tab-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--bg-card-border);
+      color: var(--text-muted);
+      padding: 6px 16px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: var(--transition);
+    }
+    .sub-tab-btn.active {
+      background: rgba(99, 102, 241, 0.2);
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    /* Loading Spinner */
+    .spinner {
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      border-left-color: var(--primary);
+      animation: spin 1s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .json-tree {
+      background: rgba(10, 14, 23, 0.9);
+      border: 1px solid var(--bg-card-border);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.85rem;
+      color: var(--accent-cyan);
+      max-height: 350px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- SVG Icon Library -->
+  <svg style="display: none;">
+    <symbol id="icon-car" viewBox="0 0 24 24"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H7c-.7 0-1.3.3-1.8.7C4.3 8.6 3 10 3 10s-2.7.6-4.5 1.1C.7 11.3 0 12.1 0 13v3c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/><path d="M5 17h2m8 0h2"/></symbol>
+    <symbol id="icon-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+    <symbol id="icon-catalog" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="icon-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3ZM12 9v4M12 17h.01"/></symbol>
+    <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 3v18h18M18 17V9M13 17V5M8 17v-3"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+    <symbol id="icon-leaf" viewBox="0 0 24 24"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></symbol>
+    <symbol id="icon-dollar" viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></symbol>
+    <symbol id="icon-calendar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></symbol>
+    <symbol id="icon-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></symbol>
+  </svg>
+
+  <header>
+    <div class="header-container">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg class="icon icon-lg"><use href="#icon-car"></use></svg>
+        </div>
+        <div>
+          <div class="brand-title">NHTSA Automotive Data API</div>
+          <div class="brand-subtitle">Microservice Interactive Control Center</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="status-badge" id="api-status">
+          <div class="status-dot"></div>
+          <span>API Connected</span>
+        </div>
+        <a href="/docs" target="_blank" class="nav-btn">
+          <span>Swagger Docs</span>
+          <svg class="icon icon-sm"><use href="#icon-external"></use></svg>
+        </a>
+        <a href="/redoc" target="_blank" class="nav-btn">
+          <span>ReDoc</span>
+          <svg class="icon icon-sm"><use href="#icon-external"></use></svg>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Navigation Tabs -->
+    <div class="tabs-nav">
+      <button class="tab-btn active" onclick="switchTab('dossier-tab')">
+        <svg class="icon"><use href="#icon-car"></use></svg>
+        <span>Comprehensive Dossier</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('dtc-tab')">
+        <svg class="icon"><use href="#icon-wrench"></use></svg>
+        <span>OBD-II Diagnostics</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('dropdowns-tab')">
+        <svg class="icon"><use href="#icon-catalog"></use></svg>
+        <span>Catalog Dropdowns</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('recalls-tab')">
+        <svg class="icon"><use href="#icon-alert"></use></svg>
+        <span>Safety Recalls</span>
+      </button>
+      <button class="tab-btn" onclick="switchTab('admin-tab')">
+        <svg class="icon"><use href="#icon-chart"></use></svg>
+        <span>Admin & DB Metrics</span>
+      </button>
+    </div>
+
+    <!-- 1. COMPREHENSIVE DOSSIER TAB -->
+    <div id="dossier-tab" class="tab-content active">
+      <div class="glass-card">
+        <div class="card-title">
+          <svg class="icon"><use href="#icon-search"></use></svg>
+          <span>Decode VIN & Generate Complete Vehicle Dossier</span>
+        </div>
+        <div class="search-bar">
+          <div class="input-group">
+            <input type="text" id="vin-input" class="form-control" placeholder="Enter 17-character VIN (e.g. 5YJSA1E26EF000001)" value="5YJSA1E26EF000001" maxlength="17">
+          </div>
+          <label style="display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 0.85rem;">
+            <input type="checkbox" id="vin-refresh"> Force Refresh Upstream
+          </label>
+          <button class="btn" onclick="fetchVehicleReport()">
+            <svg class="icon" style="stroke: #fff;"><use href="#icon-search"></use></svg>
+            <span>Fetch Dossier</span>
+          </button>
+        </div>
+        <div class="chip-container">
+          <span class="chip-label">Sample VINs:</span>
+          <span class="chip" onclick="setVin('5YJSA1E26EF000001')">2014 Tesla Model S</span>
+          <span class="chip" onclick="setVin('1HGCM82633A004352')">2003 Honda Accord</span>
+          <span class="chip" onclick="setVin('1FA6P8CF0H5100001')">2017 Ford Mustang</span>
+        </div>
+      </div>
+
+      <div id="dossier-result"></div>
+    </div>
+
+    <!-- 2. OBD-II DIAGNOSTICS TAB -->
+    <div id="dtc-tab" class="tab-content">
+      <div class="glass-card">
+        <div class="card-title">
+          <svg class="icon"><use href="#icon-wrench"></use></svg>
+          <span>OBD-II Diagnostic Trouble Code Lookup</span>
+        </div>
+        <div class="search-bar">
+          <div class="input-group">
+            <input type="text" id="dtc-input" class="form-control" placeholder="Enter Code (e.g. P0300, P0420, P0171)" value="P0300">
+          </div>
+          <div class="input-group" style="max-width: 200px;">
+            <input type="text" id="dtc-mfr" class="form-control" placeholder="OEM Filter (e.g. FORD)">
+          </div>
+          <button class="btn" onclick="fetchDTC()">
+            <svg class="icon" style="stroke: #fff;"><use href="#icon-search"></use></svg>
+            <span>Lookup DTC</span>
+          </button>
+        </div>
+        <div class="chip-container">
+          <span class="chip-label">Quick Samples:</span>
+          <span class="chip" onclick="setDtc('P0300')">P0300 (Random Misfire)</span>
+          <span class="chip" onclick="setDtc('P0420')">P0420 (Catalyst Efficiency)</span>
+          <span class="chip" onclick="setDtc('P0171')">P0171 (System Too Lean)</span>
+          <span class="chip" onclick="setDtc('P0301')">P0301 (Cylinder 1 Misfire)</span>
+        </div>
+      </div>
+
+      <div id="dtc-result"></div>
+    </div>
+
+    <!-- 3. VEHICLE CATALOG DROPDOWNS TAB -->
+    <div id="dropdowns-tab" class="tab-content">
+      <div class="glass-card">
+        <div class="card-title">
+          <svg class="icon"><use href="#icon-catalog"></use></svg>
+          <span>Cascading Vehicle Dropdown Explorer</span>
+        </div>
+        <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 20px;">
+          Select Year, Make, and Model to dynamically filter options sourced directly from open-vehicle-db CSV datasets.
+        </p>
+
+        <div class="grid-4" style="margin-bottom: 20px;">
+          <div>
+            <label class="spec-key">1. Model Year</label>
+            <select id="select-year" class="form-control" onchange="onYearChange()">
+              <option value="">Loading years...</option>
+            </select>
+          </div>
+          <div>
+            <label class="spec-key">2. Vehicle Make</label>
+            <select id="select-make" class="form-control" onchange="onMakeChange()" disabled>
+              <option value="">Select Year first</option>
+            </select>
+          </div>
+          <div>
+            <label class="spec-key">3. Vehicle Model</label>
+            <select id="select-model" class="form-control" onchange="onModelChange()" disabled>
+              <option value="">Select Make first</option>
+            </select>
+          </div>
+          <div>
+            <label class="spec-key">4. Vehicle Style</label>
+            <select id="select-style" class="form-control" disabled>
+              <option value="">Select Model first</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="dropdown-selection-summary" style="display: none;" class="stat-card">
+          <div style="font-weight: 600; color: var(--accent-emerald);">Selected Vehicle Configuration</div>
+          <div id="selected-vehicle-text" style="font-size: 1.1rem; margin-top: 4px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. SAFETY RECALLS TAB -->
+    <div id="recalls-tab" class="tab-content">
+      <div class="glass-card">
+        <div class="card-title">
+          <svg class="icon"><use href="#icon-alert"></use></svg>
+          <span>Query Vehicle Safety Recalls</span>
+        </div>
+
+        <!-- Sub-Tabs for Recall Query Mode -->
+        <div class="sub-tabs">
+          <button class="sub-tab-btn active" id="recall-mode-ymm" onclick="setRecallSearchMode('ymm')">Search by Year/Make/Model</button>
+          <button class="sub-tab-btn" id="recall-mode-vin" onclick="setRecallSearchMode('vin')">Search by VIN #</button>
+          <button class="sub-tab-btn" id="recall-mode-campaign" onclick="setRecallSearchMode('campaign')">Search by Campaign #</button>
+        </div>
+
+        <!-- Mode 1: YMM Search -->
+        <div id="recall-form-ymm" class="search-bar">
+          <div class="input-group" style="max-width: 160px;">
+            <input type="number" id="recall-year" class="form-control" placeholder="Year (2014)" value="2014">
+          </div>
+          <div class="input-group">
+            <input type="text" id="recall-make" class="form-control" placeholder="Make (Tesla)" value="Tesla">
+          </div>
+          <div class="input-group">
+            <input type="text" id="recall-model" class="form-control" placeholder="Model (Model S)" value="Model S">
+          </div>
+          <button class="btn" onclick="fetchRecalls()">
+            <svg class="icon" style="stroke: #fff;"><use href="#icon-search"></use></svg>
+            <span>Search Recalls</span>
+          </button>
+        </div>
+
+        <!-- Mode 2: VIN Search -->
+        <div id="recall-form-vin" class="search-bar" style="display: none;">
+          <div class="input-group">
+            <input type="text" id="recall-vin" class="form-control" placeholder="Enter 17-character VIN (e.g. 5YJSA1E26EF000001)" value="5YJSA1E26EF000001" maxlength="17">
+          </div>
+          <button class="btn" onclick="fetchRecalls()">
+            <svg class="icon" style="stroke: #fff;"><use href="#icon-search"></use></svg>
+            <span>Search by VIN</span>
+          </button>
+        </div>
+
+        <!-- Mode 3: Campaign # Search -->
+        <div id="recall-form-campaign" class="search-bar" style="display: none;">
+          <div class="input-group">
+            <input type="text" id="recall-campaign" class="form-control" placeholder="Enter NHTSA Campaign # (e.g. 17V260000)" value="17V260000">
+          </div>
+          <button class="btn" onclick="fetchRecalls()">
+            <svg class="icon" style="stroke: #fff;"><use href="#icon-search"></use></svg>
+            <span>Lookup Campaign</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="recalls-result"></div>
+    </div>
+
+    <!-- 5. ADMIN & DB METRICS TAB -->
+    <div id="admin-tab" class="tab-content">
+      <div class="glass-card">
+        <div class="card-title">
+          <svg class="icon"><use href="#icon-chart"></use></svg>
+          <span>Database & Microservice Statistics</span>
+        </div>
+        <div class="grid-4" id="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg class="icon icon-sm"><use href="#icon-chart"></use></svg>
+              <span>DB Engine</span>
+            </div>
+            <div class="stat-val" id="stat-engine">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg class="icon icon-sm"><use href="#icon-car"></use></svg>
+              <span>Decoded VINs</span>
+            </div>
+            <div class="stat-val" id="stat-vins">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg class="icon icon-sm"><use href="#icon-alert"></use></svg>
+              <span>Recall Campaigns</span>
+            </div>
+            <div class="stat-val" id="stat-recalls">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg class="icon icon-sm"><use href="#icon-shield"></use></svg>
+              <span>Safety Ratings</span>
+            </div>
+            <div class="stat-val" id="stat-ratings">-</div>
+          </div>
+        </div>
+
+        <div style="margin-top: 20px;">
+          <button class="btn btn-secondary" onclick="fetchAdminStats()">Refresh Statistics</button>
+        </div>
+      </div>
+
+      <div class="glass-card">
+        <div class="card-title">
+          <svg class="icon"><use href="#icon-car"></use></svg>
+          <span>Stored VIN Records</span>
+        </div>
+        <div id="admin-vins-list">
+          <button class="btn btn-secondary" onclick="loadSavedVins()">Load Saved VINs</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    let activeRecallMode = 'ymm';
+
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+      
+      event.currentTarget.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+
+      if (tabId === 'dropdowns-tab' && document.getElementById('select-year').options.length <= 1) {
+        loadYearsDropdown();
+      } else if (tabId === 'admin-tab') {
+        fetchAdminStats();
+      }
+    }
+
+    function setRecallSearchMode(mode) {
+      activeRecallMode = mode;
+      document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('recall-mode-' + mode).classList.add('active');
+
+      document.getElementById('recall-form-ymm').style.display = (mode === 'ymm') ? 'flex' : 'none';
+      document.getElementById('recall-form-vin').style.display = (mode === 'vin') ? 'flex' : 'none';
+      document.getElementById('recall-form-campaign').style.display = (mode === 'campaign') ? 'flex' : 'none';
+    }
+
+    function setVin(vin) {
+      document.getElementById('vin-input').value = vin;
+      fetchVehicleReport();
+    }
+
+    function setDtc(code) {
+      document.getElementById('dtc-input').value = code;
+      fetchDTC();
+    }
+
+    function toggleComplaint(card) {
+      card.classList.toggle('expanded');
+    }
+
+    async function fetchVehicleReport() {
+      const vin = document.getElementById('vin-input').value.trim();
+      const refresh = document.getElementById('vin-refresh').checked;
+      const resContainer = document.getElementById('dossier-result');
+
+      if (!vin || vin.length !== 17) {
+        alert('Please enter a valid 17-character VIN');
+        return;
+      }
+
+      resContainer.innerHTML = '<div class="glass-card" style="text-align: center;"><div class="spinner"></div><p style="margin-top: 10px; color: var(--text-muted);">Decoding VIN & assembling complete vehicle dossier...</p></div>';
+
+      try {
+        const resp = await fetch(`/api/vehicle-report/${vin}?refresh=${refresh}`);
+        if (!resp.ok) {
+          resContainer.innerHTML = '<div class="glass-card"><p style="color: var(--text-muted);">Vehicle record not found for this VIN.</p></div>';
+          return;
+        }
+        const data = await resp.json();
+        renderVehicleReport(data);
+      } catch (err) {
+        resContainer.innerHTML = '<div class="glass-card"><p style="color: var(--text-muted);">Unable to load vehicle dossier at this time.</p></div>';
+      }
+    }
+
+    function renderVehicleReport(data) {
+      const summary = data.report_summary || {};
+      const vehicle = data.vehicle || {};
+      const specs = data.specifications || {};
+      const recalls = data.recalls || [];
+      const ratings = data.safety_ratings || {};
+      const timeline = data.timeline || {};
+      const energy = data.energy_and_environmental_impact || {};
+      const cost = data.estimated_cost_of_ownership || {};
+      const complaintsObj = data.consumer_complaints || {};
+      const complaintsList = complaintsObj.complaints || [];
+
+      // Calculate Complaint Stats
+      let crashCount = 0;
+      let fireCount = 0;
+      let totalInjured = 0;
+      let totalDeaths = 0;
+      const componentCounts = {};
+
+      complaintsList.forEach(c => {
+        if (c.crash) crashCount++;
+        if (c.fire) fireCount++;
+        if (c.injured) totalInjured += c.injured;
+        if (c.deaths) totalDeaths += c.deaths;
+
+        if (c.components) {
+          const comps = c.components.split(/[,;/]/).map(s => s.trim().toUpperCase());
+          comps.forEach(comp => {
+            if (comp && comp.length > 2) {
+              componentCounts[comp] = (componentCounts[comp] || 0) + 1;
+            }
+          });
+        }
+      });
+
+      const topComponents = Object.entries(componentCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6);
+
+      // Recalls List HTML
+      let recallsHtml = recalls.length === 0 
+        ? '<div class="stat-card" style="border-color: rgba(16,185,129,0.3); color: var(--accent-emerald);">✅ No open safety recall campaigns recorded.</div>'
+        : recalls.map(r => `
+            <div class="recall-item">
+              <div class="recall-header">
+                <span class="recall-campaign">NHTSA Campaign #${r.nhtsa_campaign_number}</span>
+                <span class="badge ${r.park_it || r.park_outside ? 'badge-danger' : 'badge-warning'}">
+                  ${r.park_it ? '🚨 PARK IT IMMEDIATELY' : r.park_outside ? '⚠️ PARK OUTSIDE' : 'SAFETY RECALL'}
+                </span>
+              </div>
+              <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 6px;">Affected Component: ${r.component || 'N/A'}</div>
+              <div class="recall-body">${r.summary || 'No summary available.'}</div>
+              ${r.remedy ? `<div style="margin-top: 10px; font-size: 0.85rem; color: var(--accent-emerald);"><strong>Remedy:</strong> ${r.remedy}</div>` : ''}
+            </div>
+          `).join('');
+
+      // Timeline Events HTML (Oldest to Newest, Today for final event)
+      let timelineEventsHtml = (timeline.events || []).map(evt => `
+        <div class="timeline-item">
+          <div class="timeline-dot ${evt.type || ''}"></div>
+          <div class="timeline-date">${evt.date || ''}</div>
+          <div class="timeline-title">${evt.title || ''}</div>
+          <div class="timeline-desc">${evt.description || ''}</div>
+        </div>
+      `).join('');
+
+      // Expandable Complaints List HTML
+      let complaintsHtml = complaintsList.length === 0
+        ? '<div class="stat-card" style="color: var(--accent-emerald);">No defect complaints recorded.</div>'
+        : complaintsList.slice(0, 15).map(c => `
+            <div class="complaint-card" onclick="toggleComplaint(this)">
+              <div class="complaint-header">
+                <div>
+                  <span style="font-weight: 600; color: var(--text-main);">ODI #${c.odi_number}</span>
+                  <span style="color: var(--text-muted); font-size: 0.82rem; margin-left: 10px;">Filed: ${c.date_complaint_filed || 'N/A'}</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  ${c.crash ? '<span class="badge badge-danger">Crash</span>' : ''}
+                  ${c.fire ? '<span class="badge badge-danger">Fire</span>' : ''}
+                  <svg class="icon icon-sm"><use href="#icon-chevron-down"></use></svg>
+                </div>
+              </div>
+              <div class="complaint-details">
+                <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 4px;">Component: ${c.components || 'General'}</div>
+                <div>${c.summary || 'No summary provided.'}</div>
+              </div>
+            </div>
+          `).join('');
+
+      // Formatted Key-Value Specs Table (Hiding raw objects)
+      const validSpecEntries = Object.entries(specs).filter(([k, v]) => {
+        if (k.toLowerCase().includes('raw')) return false;
+        return typeof v !== 'object' && v !== null && v !== undefined && String(v).trim() !== '';
+      });
+
+      let specsTableHtml = validSpecEntries.length === 0 
+        ? ''
+        : `
+          <table class="spec-table">
+            <tbody>
+              ${validSpecEntries.map(([k, v]) => `
+                <tr>
+                  <td class="spec-label">${k.replace(/_/g, ' ').toUpperCase()}</td>
+                  <td class="spec-val">${v}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+
+      let html = `
+        <!-- Vehicle Header -->
+        <div class="glass-card">
+          <div class="dossier-header">
+            <div>
+              <div class="dossier-title">${vehicle.year || timeline.model_year || ''} ${vehicle.make || ''} ${vehicle.model || ''}</div>
+              <div style="color: var(--text-muted); font-size: 0.9rem; margin-top: 2px;">
+                VIN: <strong style="color: var(--text-main); font-family: monospace;">${data.vin}</strong>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <span class="badge badge-primary">${vehicle.body_class || 'Passenger Vehicle'}</span>
+              ${summary.critical_safety_recalls > 0 ? `<span class="badge badge-danger">🚨 ${summary.critical_safety_recalls} Critical Safety Alerts</span>` : ''}
+            </div>
+          </div>
+
+          <!-- Overview Quick Stats Bar -->
+          <div class="grid-4">
+            <div class="stat-card">
+              <div class="stat-label"><svg class="icon icon-sm"><use href="#icon-shield"></use></svg><span>NCAP Crash Rating</span></div>
+              <div class="stat-val" style="color: var(--accent-amber);">${ratings.overall_rating ? ratings.overall_rating + ' ⭐' : 'Not Rated'}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label"><svg class="icon icon-sm"><use href="#icon-alert"></use></svg><span>Active Recalls</span></div>
+              <div class="stat-val" style="color: ${summary.total_recalls > 0 ? 'var(--accent-rose)' : 'var(--accent-emerald)'};">${summary.total_recalls}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label"><svg class="icon icon-sm"><use href="#icon-leaf"></use></svg><span>Fuel / Energy</span></div>
+              <div class="stat-val" style="font-size: 1.2rem; color: var(--accent-cyan);">${energy.fuel_type || 'N/A'}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label"><svg class="icon icon-sm"><use href="#icon-dollar"></use></svg><span>Est. Annual Service</span></div>
+              <div class="stat-val" style="font-size: 1.4rem; color: var(--text-main);">$${cost.estimated_annual_maintenance_usd || 0}/yr</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ROW 1: 3 CARDS SIDE-BY-SIDE -->
+        <div class="grid-3">
+          <!-- 1. Safety Rating & Defect Intel -->
+          <div class="glass-card" style="margin-bottom: 0;">
+            <div class="card-title">
+              <svg class="icon"><use href="#icon-shield"></use></svg>
+              <span>Safety Rating & Defect Intel</span>
+            </div>
+            <table class="spec-table">
+              <tbody>
+                <tr>
+                  <td class="spec-label">OVERALL NCAP RATING</td>
+                  <td class="spec-val" style="color: var(--accent-amber);">${ratings.overall_rating ? ratings.overall_rating + ' Stars' : 'Not Rated'}</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">FRONT CRASH RATING</td>
+                  <td class="spec-val">${ratings.overall_front_crash_rating ? ratings.overall_front_crash_rating + ' Stars' : 'N/A'}</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">CONSUMER COMPLAINTS</td>
+                  <td class="spec-val">${summary.total_consumer_complaints} Filed</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">ODI INVESTIGATIONS</td>
+                  <td class="spec-val" style="color: ${summary.open_investigations_count > 0 ? 'var(--accent-rose)' : 'var(--accent-emerald)'};">
+                    ${summary.open_investigations_count} Open
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 2. EPA Energy Efficiency & Environmental Impact -->
+          <div class="glass-card" style="margin-bottom: 0;">
+            <div class="card-title">
+              <svg class="icon"><use href="#icon-leaf"></use></svg>
+              <span>EPA Energy & Environmental Impact</span>
+            </div>
+            <table class="spec-table">
+              <tbody>
+                <tr>
+                  <td class="spec-label">POWERTRAIN</td>
+                  <td class="spec-val">${energy.powertrain_type || 'N/A'}</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">EPA FUEL RATING</td>
+                  <td class="spec-val">${energy.estimated_mpg_or_mpge || 'N/A'}</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">ANNUAL ENERGY COST</td>
+                  <td class="spec-val" style="color: var(--accent-emerald);">$${energy.annual_energy_cost_usd || 0} / year</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">CO2 EMISSIONS</td>
+                  <td class="spec-val">${energy.co2_emissions_index || 'N/A'}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 3. Estimated Cost of Ownership & Depreciation -->
+          <div class="glass-card" style="margin-bottom: 0;">
+            <div class="card-title">
+              <svg class="icon"><use href="#icon-dollar"></use></svg>
+              <span>Estimated Cost of Ownership</span>
+            </div>
+            <table class="spec-table">
+              <tbody>
+                <tr>
+                  <td class="spec-label">MAINTENANCE TIER</td>
+                  <td class="spec-val">${cost.maintenance_tier || 'N/A'}</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">EST. ANNUAL SERVICE</td>
+                  <td class="spec-val">$${cost.estimated_annual_maintenance_usd || 0} / year</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">5-YR VALUE RETENTION</td>
+                  <td class="spec-val" style="color: var(--accent-amber);">${cost.five_year_value_retention_pct || 45}% Retained</td>
+                </tr>
+                <tr>
+                  <td class="spec-label">DEPRECIATION CATEGORY</td>
+                  <td class="spec-val">${cost.depreciation_risk_category || 'N/A'}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ROW 2: VEHICLE TIMELINE (FULL-WIDTH ROW BENEATH ROW 1) -->
+        <div class="glass-card" style="margin-top: 24px;">
+          <div class="card-title">
+            <svg class="icon"><use href="#icon-calendar"></use></svg>
+            <span>Vehicle Timeline & Lifecycle Events</span>
+          </div>
+          <div class="grid-4" style="margin-bottom: 20px;">
+            <div class="stat-card" style="display: flex; flex-direction: column; justify-content: center; min-height: 85px;">
+              <div class="spec-key">MODEL YEAR</div>
+              <div class="stat-val-sm">${vehicle.year || timeline.model_year || 'N/A'}</div>
+            </div>
+            <div class="stat-card" style="display: flex; flex-direction: column; justify-content: center; min-height: 85px;">
+              <div class="spec-key">VEHICLE AGE</div>
+              <div class="stat-val-sm">${timeline.vehicle_age_years !== undefined ? timeline.vehicle_age_years + ' Years Old' : 'N/A'}</div>
+            </div>
+            <div class="stat-card" style="display: flex; flex-direction: column; justify-content: center; min-height: 85px;">
+              <div class="spec-key">LIFECYCLE PHASE</div>
+              <div class="stat-val-sm" style="color: var(--accent-cyan); font-size: 0.95rem;">${timeline.generation_lifecycle_phase || 'N/A'}</div>
+            </div>
+            <div class="stat-card" style="display: flex; flex-direction: column; justify-content: center; min-height: 85px;">
+              <div class="spec-key">ASSEMBLY COUNTRY</div>
+              <div class="stat-val-sm" style="font-size: 0.95rem;">${timeline.manufacture_country || 'United States'}</div>
+            </div>
+          </div>
+
+          <div style="font-weight: 600; color: var(--text-main); margin-bottom: 12px; font-size: 1.05rem;">Chronological Event History (Oldest to Newest)</div>
+          <div class="timeline-container">
+            ${timelineEventsHtml}
+          </div>
+        </div>
+
+        <!-- TECHNICAL SPECIFICATIONS & BUILD EQUIPMENT CARD -->
+        <div class="glass-card">
+          <div class="card-title">
+            <svg class="icon"><use href="#icon-car"></use></svg>
+            <span>Technical Specifications & Build Equipment</span>
+          </div>
+          ${specsTableHtml}
+        </div>
+
+        <!-- SAFETY RECALL CAMPAIGNS CARD -->
+        <div class="glass-card">
+          <div class="card-title">
+            <svg class="icon"><use href="#icon-alert"></use></svg>
+            <span>Active Safety Recall Campaigns (${recalls.length})</span>
+          </div>
+          <div>${recallsHtml}</div>
+        </div>
+
+        <!-- NHTSA CONSUMER DEFECT COMPLAINTS CARD -->
+        <div class="glass-card">
+          <div class="card-title">
+            <svg class="icon"><use href="#icon-alert"></use></svg>
+            <span>NHTSA Consumer Defect Complaints Overview</span>
+          </div>
+
+          <!-- Overview Metric Chips -->
+          <div class="grid-4" style="margin-bottom: 20px;">
+            <div class="stat-card">
+              <div class="stat-label">Total Complaints</div>
+              <div class="stat-val" style="color: var(--text-main);">${summary.total_consumer_complaints}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Crash Incidents</div>
+              <div class="stat-val" style="color: var(--accent-rose);">${crashCount}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Fire Incidents</div>
+              <div class="stat-val" style="color: var(--accent-rose);">${fireCount}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Injuries / Deaths</div>
+              <div class="stat-val" style="color: var(--accent-amber);">${totalInjured} / ${totalDeaths}</div>
+            </div>
+          </div>
+
+          <!-- Most Reported Components Summary -->
+          ${topComponents.length > 0 ? `
+            <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 8px; font-size: 0.95rem;">Most Reported Components</div>
+            <div class="component-chips">
+              ${topComponents.map(([compName, count]) => `
+                <div class="component-chip">
+                  <span>${compName}</span>
+                  <span class="component-chip-count">${count}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+
+          <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 14px;">
+            Click any complaint card below to expand and read full incident report details.
+          </p>
+          <div>${complaintsHtml}</div>
+        </div>
+      `;
+
+      document.getElementById('dossier-result').innerHTML = html;
+    }
+
+    // OBD-II DTC Lookup
+    async function fetchDTC() {
+      const code = document.getElementById('dtc-input').value.trim();
+      const mfr = document.getElementById('dtc-mfr').value.trim();
+      const resContainer = document.getElementById('dtc-result');
+
+      if (!code) return;
+
+      resContainer.innerHTML = '<div class="glass-card" style="text-align: center;"><div class="spinner"></div></div>';
+
+      try {
+        let url = `/api/dtc/${code}`;
+        if (mfr) url += `?manufacturer=${mfr}`;
+
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          resContainer.innerHTML = '<div class="glass-card"><p style="color: var(--text-muted);">DTC code not found.</p></div>';
+          return;
+        }
+        const data = await resp.json();
+
+        resContainer.innerHTML = `
+          <div class="glass-card">
+            <div class="dtc-box">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div class="dtc-code">${data.code}</div>
+                <span class="badge badge-warning">${data.type || 'Diagnostic Code'}</span>
+              </div>
+              <div style="font-size: 1.2rem; font-weight: 600; margin-top: 10px; color: #fff;">${data.description}</div>
+              <div style="margin-top: 8px; font-size: 0.85rem; color: var(--text-muted);">
+                Manufacturer Standard: <strong>${data.manufacturer}</strong>
+              </div>
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        resContainer.innerHTML = '<div class="glass-card"><p style="color: var(--text-muted);">Unable to lookup DTC code.</p></div>';
+      }
+    }
+
+    // Cascading Dropdowns
+    async function loadYearsDropdown() {
+      const select = document.getElementById('select-year');
+      try {
+        const resp = await fetch('/api/vehicles/years');
+        const data = await resp.json();
+        select.innerHTML = '<option value="">-- Select Year --</option>' + 
+          data.years.map(y => `<option value="${y}">${y}</option>`).join('');
+      } catch (err) {
+        select.innerHTML = '<option value="">Error loading years</option>';
+      }
+    }
+
+    async function onYearChange() {
+      const year = document.getElementById('select-year').value;
+      const selectMake = document.getElementById('select-make');
+      const selectModel = document.getElementById('select-model');
+      const selectStyle = document.getElementById('select-style');
+
+      selectMake.disabled = true;
+      selectModel.disabled = true;
+      selectStyle.disabled = true;
+      selectMake.innerHTML = '<option value="">Loading makes...</option>';
+      selectModel.innerHTML = '<option value="">Select Make first</option>';
+      selectStyle.innerHTML = '<option value="">Select Model first</option>';
+
+      if (!year) return;
+
+      try {
+        const resp = await fetch(`/api/vehicles/makes?year=${year}`);
+        const data = await resp.json();
+        selectMake.innerHTML = '<option value="">-- Select Make --</option>' + 
+          data.makes.map(m => `<option value="${m}">${m}</option>`).join('');
+        selectMake.disabled = false;
+      } catch (err) {
+        selectMake.innerHTML = '<option value="">Error loading makes</option>';
+      }
+    }
+
+    async function onMakeChange() {
+      const year = document.getElementById('select-year').value;
+      const make = document.getElementById('select-make').value;
+      const selectModel = document.getElementById('select-model');
+      const selectStyle = document.getElementById('select-style');
+
+      selectModel.disabled = true;
+      selectStyle.disabled = true;
+      selectModel.innerHTML = '<option value="">Loading models...</option>';
+      selectStyle.innerHTML = '<option value="">Select Model first</option>';
+
+      if (!make) return;
+
+      try {
+        const resp = await fetch(`/api/vehicles/models?year=${year}&make=${encodeURIComponent(make)}`);
+        const data = await resp.json();
+        selectModel.innerHTML = '<option value="">-- Select Model --</option>' + 
+          data.models.map(m => `<option value="${m}">${m}</option>`).join('');
+        selectModel.disabled = false;
+      } catch (err) {
+        selectModel.innerHTML = '<option value="">Error loading models</option>';
+      }
+    }
+
+    async function onModelChange() {
+      const year = document.getElementById('select-year').value;
+      const make = document.getElementById('select-make').value;
+      const model = document.getElementById('select-model').value;
+      const selectStyle = document.getElementById('select-style');
+
+      selectStyle.disabled = true;
+      selectStyle.innerHTML = '<option value="">Loading styles...</option>';
+
+      if (!model) return;
+
+      try {
+        const resp = await fetch(`/api/vehicles/styles?year=${year}&make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}`);
+        const data = await resp.json();
+        selectStyle.innerHTML = '<option value="">-- Select Style --</option>' + 
+          data.styles.map(s => `<option value="${s}">${s}</option>`).join('');
+        selectStyle.disabled = false;
+
+        document.getElementById('dropdown-selection-summary').style.display = 'block';
+        document.getElementById('selected-vehicle-text').innerText = `${year} ${make} ${model}`;
+      } catch (err) {
+        selectStyle.innerHTML = '<option value="">Error loading styles</option>';
+      }
+    }
+
+    // Safety Recalls Query Handler
+    async function fetchRecalls() {
+      const container = document.getElementById('recalls-result');
+      container.innerHTML = '<div class="glass-card" style="text-align: center;"><div class="spinner"></div></div>';
+
+      try {
+        let url = '';
+        if (activeRecallMode === 'ymm') {
+          const make = document.getElementById('recall-make').value.trim();
+          const model = document.getElementById('recall-model').value.trim();
+          const year = document.getElementById('recall-year').value.trim();
+          url = `/api/recalls?make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}&year=${year}`;
+        } else if (activeRecallMode === 'vin') {
+          const vin = document.getElementById('recall-vin').value.trim();
+          url = `/api/recalls?vin=${encodeURIComponent(vin)}`;
+        } else if (activeRecallMode === 'campaign') {
+          const campaignNum = document.getElementById('recall-campaign').value.trim();
+          url = `/api/recalls/campaign/${encodeURIComponent(campaignNum)}`;
+        }
+
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          container.innerHTML = '<div class="glass-card"><p style="color: var(--text-muted);">No recalls found matching your query.</p></div>';
+          return;
+        }
+        const data = await resp.json();
+        
+        // Handle single campaign vs recall list payload
+        const list = data.recalls ? data.recalls : (data.nhtsa_campaign_number ? [data] : []);
+        if (list.length === 0) {
+          container.innerHTML = '<div class="glass-card"><p style="color: var(--accent-emerald);">No recalls found for this query.</p></div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <div class="glass-card">
+            <div class="card-title">Found ${list.length} Recall Campaign(s)</div>
+            ${list.map(r => `
+              <div class="recall-item">
+                <div class="recall-header">
+                  <span class="recall-campaign">NHTSA Campaign #${r.nhtsa_campaign_number}</span>
+                  <span class="badge ${r.park_it || r.park_outside ? 'badge-danger' : 'badge-warning'}">
+                    ${r.park_it ? '🚨 PARK IT' : r.park_outside ? '⚠️ PARK OUTSIDE' : 'RECALL'}
+                  </span>
+                </div>
+                <div style="font-weight: 600; color: var(--accent-cyan); margin-bottom: 6px;">Affected Component: ${r.component}</div>
+                <div class="recall-body">${r.summary}</div>
+                ${r.remedy ? `<div style="margin-top: 10px; font-size: 0.85rem; color: var(--accent-emerald);"><strong>Remedy:</strong> ${r.remedy}</div>` : ''}
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } catch (err) {
+        container.innerHTML = '<div class="glass-card"><p style="color: var(--text-muted);">Unable to load recall data.</p></div>';
+      }
+    }
+
+    // Admin Stats
+    async function fetchAdminStats() {
+      try {
+        const resp = await fetch('/api/admin/db/stats');
+        const data = await resp.json();
+        document.getElementById('stat-engine').innerText = data.database_engine.toUpperCase();
+        document.getElementById('stat-vins').innerText = data.tables.decoded_vins;
+        document.getElementById('stat-recalls').innerText = data.tables.saved_recall_campaigns;
+        document.getElementById('stat-ratings').innerText = data.tables.saved_safety_ratings;
+      } catch (err) {
+        console.error('Failed to load admin stats', err);
+      }
+    }
+
+    async function loadSavedVins() {
+      const container = document.getElementById('admin-vins-list');
+      try {
+        const resp = await fetch('/api/admin/db/vins');
+        const data = await resp.json();
+        container.innerHTML = `
+          <div class="json-tree">${JSON.stringify(data, null, 2)}</div>
+        `;
+      } catch (err) {
+        container.innerHTML = `<p style="color: var(--text-muted);">Failed to load saved VINs</p>`;
+      }
+    }
+
+    // Initial check
+    fetch('/health').then(r => r.json()).then(d => {
+      if (d.status === 'healthy') {
+        document.getElementById('api-status').querySelector('span').innerText = 'API Healthy (200 OK)';
+      }
+    });
+
+    // Auto-fetch default VIN on load
+    fetchVehicleReport();
+  </script>
+</body>
+</html>
