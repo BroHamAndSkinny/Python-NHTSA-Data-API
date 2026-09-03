@@ -178,6 +178,23 @@ class VehicleEPARating(Base):
         UniqueConstraint("make", "model", "year", name="uq_epa_rating_mmy"),
     )
 
+class VehicleImageCache(Base):
+    __tablename__ = "vehicle_image_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_key: Mapped[str] = mapped_column(String(200), index=True)
+    make: Mapped[Optional[str]] = mapped_column(String(50))
+    model: Mapped[Optional[str]] = mapped_column(String(50))
+    year: Mapped[Optional[int]] = mapped_column(Integer)
+    exterior_color: Mapped[Optional[str]] = mapped_column(String(50))
+    interior_color: Mapped[Optional[str]] = mapped_column(String(50))
+    page: Mapped[int] = mapped_column(Integer, default=1)
+    result_index: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[Optional[str]] = mapped_column(Text)
+    domain_source_url: Mapped[str] = mapped_column(Text)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
 def init_db():
     """Initializes tables on startup."""
     Base.metadata.create_all(bind=engine)

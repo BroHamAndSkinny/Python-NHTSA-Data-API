@@ -1,15 +1,21 @@
+import io
 import os
 import re
 import requests
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Query, Depends
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from PIL import Image
+
+# Load environment variables from .env if present
+load_dotenv()
 
 # Database & ORM
 import database
@@ -17,7 +23,8 @@ from database import (
     init_db, get_db, DecodedVIN, VehicleSyncProfile,
     RecallCampaign, CampaignVehicleAssociation,
     VehicleSafetyRating, VehicleComplaint,
-    VehicleInvestigation, VehicleEPARating
+    VehicleInvestigation, VehicleEPARating,
+    VehicleImageCache
 )
 
 # Local module imports
@@ -509,6 +516,26 @@ class SavedVinSchema(BaseModel):
 class SavedVinsResponse(BaseModel):
     count: int = Field(..., example=1)
     vins: List[SavedVinSchema]
+
+class VehicleImageItemSchema(BaseModel):
+    result_index: int = Field(..., example=0)
+    title: str = Field(..., example="2024 Porsche 911 Carrera GTS")
+    domain_source_url: str = Field(..., example="https://example.com/porsche.jpg")
+    mime_type: str = Field(..., example="image/jpeg")
+    proxy_src: str = Field(..., example="http://localhost:8000/api/proxy-image?url=https%3A%2F%2Fexample.com%2Fporsche.jpg")
+
+class VehicleImagesResponse(BaseModel):
+    search_query: str = Field(..., example="2024 Porsche 911 Carrera Black")
+    make: Optional[str] = Field(None, example="Porsche")
+    model: Optional[str] = Field(None, example="911")
+    year: Optional[int] = Field(None, example=2024)
+    exterior_color: Optional[str] = Field(None, example="Black")
+    interior_color: Optional[str] = Field(None, example="Black")
+    page: int = Field(1, example=1)
+    limit: int = Field(5, example=5)
+    total_returned: int = Field(..., example=5)
+    source: str = Field(..., example="google_custom_search")
+    images: List[VehicleImageItemSchema]
 
 # -------------------------------------------------------------------
 # System Probes
@@ -1724,3 +1751,181 @@ def get_energy_efficiency(
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Error querying EPA ratings: {str(e)}")
+
+# -------------------------------------------------------------------
+# 9. Google Vehicle Image Search & Proxy Streaming
+# -------------------------------------------------------------------
+@app.get("/api/images", response_model=VehicleImagesResponse, tags=["Vehicle Image Search"])
+def search_vehicle_images(
+    request: Request,
+    make: Optional[str] = Query(None, description="Vehicle Make (e.g. Porsche, Tesla)"),
+    model: Optional[str] = Query(None, description="Vehicle Model (e.g. 911, Model S)"),
+    year: Optional[int] = Query(None, description="Model Year (e.g. 2024, 2014)"),
+    exterior_color: Optional[str] = Query(None, description="Optional Exterior Color (e.g. Black, Red)"),
+    interior_color: Optional[str] = Query(None, description="Optional Interior Color (e.g. Black, White, Tan)"),
+    q: Optional[str] = Query(None, description="Freeform query fallback"),
+    page: int = Query(1, ge=1, description="Page number (5 images per page)"),
+    limit: int = Query(5, ge=1, le=10, description="Number of images per page (default 5, max 10)"),
+    refresh: bool = Query(False, description="Force refresh from Google Custom Search API"),
+    db: Session = Depends(get_db)
+):
+    """
+    Search domain-locked Google Images for specified Year/Make/Model and optional interior/exterior colors.
+    Supports pagination (`page=1` for items 1-5, `page=2` for items 6-10, etc.) and server-side DB caching.
+    """
+    if q and q.strip():
+        search_query = q.strip()
+    else:
+        parts = [str(year) if year else "", make or "", model or "", exterior_color or "", interior_color or ""]
+        search_query = " ".join([p for p in parts if p]).strip()
+
+    if not search_query:
+        search_query = "Automotive Vehicle"
+
+    query_key = f"{search_query.upper().replace(' ', '_')}_P{page}_L{limit}"
+    base_url = str(request.base_url).rstrip("/")
+
+    if not refresh:
+        cached_items = db.scalars(
+            select(VehicleImageCache)
+            .where(VehicleImageCache.query_key == query_key)
+            .order_by(VehicleImageCache.result_index)
+        ).all()
+
+        if cached_items:
+            output_images = []
+            for item in cached_items:
+                output_images.append({
+                    "result_index": item.result_index,
+                    "title": item.title or "Vehicle Image",
+                    "domain_source_url": item.domain_source_url,
+                    "mime_type": item.mime_type or "image/jpeg",
+                    "proxy_src": f"{base_url}/api/proxy-image?url={requests.utils.quote(item.domain_source_url)}"
+                })
+            return {
+                "search_query": search_query,
+                "make": make,
+                "model": model,
+                "year": year,
+                "exterior_color": exterior_color,
+                "interior_color": interior_color,
+                "page": page,
+                "limit": limit,
+                "total_returned": len(output_images),
+                "source": "local_database_cache",
+                "images": output_images
+            }
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    cx_id = os.getenv("GOOGLE_CX_ID")
+
+    if not api_key or not cx_id:
+        raise HTTPException(
+            status_code=400,
+            detail="GOOGLE_API_KEY and GOOGLE_CX_ID environment variables must be set in your .env file."
+        )
+
+    start_index = (page - 1) * limit + 1
+    google_endpoint = "https://www.googleapis.com/customsearch/v1"
+
+    params = {
+        'key': api_key,
+        'cx': cx_id,
+        'q': search_query,
+        'searchType': 'image',
+        'start': start_index,
+        'num': limit
+    }
+
+    try:
+        res = requests.get(google_endpoint, params=params, timeout=8)
+        if res.status_code == 403:
+            err_json = res.json() if "json" in res.headers.get("content-type", "").lower() else {}
+            err_msg = err_json.get("error", {}).get("message", res.text)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Google Custom Search API Error (403 Forbidden): {err_msg}. Please ensure 'Custom Search API' is enabled in Google Cloud Console and 'Image Search' is enabled on your Programmable Search Engine (CX)."
+            )
+        res.raise_for_status()
+        data = res.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google API query failed: {str(e)}")
+
+    items = data.get('items', [])
+    output_images = []
+
+    if refresh:
+        db.query(VehicleImageCache).filter(VehicleImageCache.query_key == query_key).delete()
+        db.commit()
+
+    for idx, item in enumerate(items):
+        orig_url = item.get('link')
+        if not orig_url:
+            continue
+        
+        title_str = item.get('title', 'Vehicle Image')
+        mime_str = item.get('mime', 'image/jpeg')
+
+        db_cache_record = VehicleImageCache(
+            query_key=query_key,
+            make=make,
+            model=model,
+            year=year,
+            exterior_color=exterior_color,
+            interior_color=interior_color,
+            page=page,
+            result_index=idx,
+            title=title_str,
+            domain_source_url=orig_url,
+            mime_type=mime_str
+        )
+        db.add(db_cache_record)
+
+        output_images.append({
+            "result_index": idx,
+            "title": title_str,
+            "domain_source_url": orig_url,
+            "mime_type": mime_str,
+            "proxy_src": f"{base_url}/api/proxy-image?url={requests.utils.quote(orig_url)}"
+        })
+
+    db.commit()
+
+    return {
+        "search_query": search_query,
+        "make": make,
+        "model": model,
+        "year": year,
+        "exterior_color": exterior_color,
+        "interior_color": interior_color,
+        "page": page,
+        "limit": limit,
+        "total_returned": len(output_images),
+        "source": "google_custom_search_live",
+        "images": output_images
+    }
+
+@app.get("/api/proxy-image", tags=["Vehicle Image Search"])
+def proxy_image(url: str = Query(..., description="The original remote image URL to stream")):
+    """
+    Fetches remote image server-side and streams it to the client.
+    Bypasses browser CORS policy and target domain image hotlinking blocks.
+    """
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        img_res = requests.get(url, headers=headers, timeout=8)
+        img_res.raise_for_status()
+
+        image = Image.open(io.BytesIO(img_res.content))
+
+        img_byte_arr = io.BytesIO()
+        img_format = image.format if image.format else 'JPEG'
+        image.save(img_byte_arr, format=img_format)
+        img_byte_arr.seek(0)
+
+        media_type = f"image/{img_format.lower()}" if img_format else "image/jpeg"
+        return StreamingResponse(img_byte_arr, media_type=media_type)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not retrieve or proxy image: {str(e)}")
