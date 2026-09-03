@@ -12,7 +12,13 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from PIL import Image
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    Image = None
+    HAS_PIL = False
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -1918,14 +1924,16 @@ def proxy_image(url: str = Query(..., description="The original remote image URL
         img_res = requests.get(url, headers=headers, timeout=8)
         img_res.raise_for_status()
 
-        image = Image.open(io.BytesIO(img_res.content))
-
-        img_byte_arr = io.BytesIO()
-        img_format = image.format if image.format else 'JPEG'
-        image.save(img_byte_arr, format=img_format)
-        img_byte_arr.seek(0)
-
-        media_type = f"image/{img_format.lower()}" if img_format else "image/jpeg"
-        return StreamingResponse(img_byte_arr, media_type=media_type)
+        if HAS_PIL and Image:
+            image = Image.open(io.BytesIO(img_res.content))
+            img_byte_arr = io.BytesIO()
+            img_format = image.format if image.format else 'JPEG'
+            image.save(img_byte_arr, format=img_format)
+            img_byte_arr.seek(0)
+            media_type = f"image/{img_format.lower()}" if img_format else "image/jpeg"
+            return StreamingResponse(img_byte_arr, media_type=media_type)
+        else:
+            content_type = img_res.headers.get("content-type", "image/jpeg")
+            return StreamingResponse(io.BytesIO(img_res.content), media_type=content_type)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not retrieve or proxy image: {str(e)}")
