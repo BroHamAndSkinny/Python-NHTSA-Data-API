@@ -901,6 +901,9 @@
           <div class="input-group" style="max-width: 160px;">
             <input type="text" id="img-int" class="form-control" placeholder="Interior (Red)">
           </div>
+          <label style="display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 0.85rem;">
+            <input type="checkbox" id="img-refresh"> Force Refresh Upstream
+          </label>
           <button class="btn" onclick="fetchVehicleImages(1)">
             <svg class="icon" style="stroke: #fff;"><use href="#icon-search"></use></svg>
             <span>Search Images</span>
@@ -1562,12 +1565,13 @@
       const model = document.getElementById('img-model').value.trim();
       const ext = document.getElementById('img-ext').value.trim();
       const int = document.getElementById('img-int').value.trim();
+      const refresh = document.getElementById('img-refresh').checked;
       const container = document.getElementById('images-result');
 
       container.innerHTML = '<div class="glass-card" style="text-align: center;"><div class="spinner"></div><p style="margin-top: 10px; color: var(--text-muted);">Fetching images from Google Custom Search...</p></div>';
 
       try {
-        let url = `/api/images?page=${page}&limit=5`;
+        let url = `/api/images?page=${page}&limit=5&refresh=${refresh}`;
         if (year) url += `&year=${year}`;
         if (make) url += `&make=${encodeURIComponent(make)}`;
         if (model) url += `&model=${encodeURIComponent(model)}`;

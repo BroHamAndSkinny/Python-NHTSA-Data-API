@@ -1822,44 +1822,73 @@ def search_vehicle_images(
                 "images": output_images
             }
 
+    serper_key = os.getenv("SERPER_API_KEY")
     api_key = os.getenv("GOOGLE_API_KEY")
     cx_id = os.getenv("GOOGLE_CX_ID")
 
-    if not api_key or not cx_id:
+    items = []
+    source_name = "google_custom_search_live"
+
+    # Option A: Serper.dev (if SERPER_API_KEY is configured)
+    if serper_key and serper_key.strip():
+        source_name = "serper_dev_google_images_live"
+        serper_url = "https://google.serper.dev/images"
+        
+        overall_offset = (page - 1) * limit
+        serper_page = (overall_offset // 10) + 1
+        local_offset = overall_offset % 10
+
+        payload = {"q": search_query, "page": serper_page}
+        headers = {"X-API-KEY": serper_key.strip(), "Content-Type": "application/json"}
+        try:
+            res = requests.post(serper_url, json=payload, headers=headers, timeout=8)
+            res.raise_for_status()
+            data = res.json()
+            raw_images = data.get("images", [])[local_offset : local_offset + limit]
+            for img_item in raw_images:
+                items.append({
+                    "link": img_item.get("imageUrl"),
+                    "title": img_item.get("title", search_query),
+                    "mime": "image/jpeg"
+                })
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Serper.dev API query failed: {str(e)}")
+
+    # Option B: Google Custom Search API
+    elif api_key and cx_id:
+        start_index = (page - 1) * limit + 1
+        google_endpoint = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            'key': api_key.strip(),
+            'cx': cx_id.strip(),
+            'q': search_query,
+            'searchType': 'image',
+            'start': start_index,
+            'num': limit
+        }
+
+        try:
+            res = requests.get(google_endpoint, params=params, timeout=8)
+            if res.status_code == 403:
+                err_json = res.json() if "json" in res.headers.get("content-type", "").lower() else {}
+                err_msg = err_json.get("error", {}).get("message", res.text)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Google API Error (403 Forbidden): {err_msg}. Ensure API Key Restrictions are set to 'None' in Google Cloud Console, or add SERPER_API_KEY to .env."
+                )
+            res.raise_for_status()
+            data = res.json()
+            items = data.get("items", [])
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Google API query failed: {str(e)}")
+    else:
         raise HTTPException(
             status_code=400,
-            detail="GOOGLE_API_KEY and GOOGLE_CX_ID environment variables must be set in your .env file."
+            detail="No search API credentials found. Please set GOOGLE_API_KEY & GOOGLE_CX_ID or SERPER_API_KEY in your .env file."
         )
 
-    start_index = (page - 1) * limit + 1
-    google_endpoint = "https://www.googleapis.com/customsearch/v1"
-
-    params = {
-        'key': api_key,
-        'cx': cx_id,
-        'q': search_query,
-        'searchType': 'image',
-        'start': start_index,
-        'num': limit
-    }
-
-    try:
-        res = requests.get(google_endpoint, params=params, timeout=8)
-        if res.status_code == 403:
-            err_json = res.json() if "json" in res.headers.get("content-type", "").lower() else {}
-            err_msg = err_json.get("error", {}).get("message", res.text)
-            raise HTTPException(
-                status_code=502,
-                detail=f"Google Custom Search API Error (403 Forbidden): {err_msg}. Please ensure 'Custom Search API' is enabled in Google Cloud Console and 'Image Search' is enabled on your Programmable Search Engine (CX)."
-            )
-        res.raise_for_status()
-        data = res.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Google API query failed: {str(e)}")
-
-    items = data.get('items', [])
     output_images = []
 
     if refresh:
@@ -1909,7 +1938,7 @@ def search_vehicle_images(
         "page": page,
         "limit": limit,
         "total_returned": len(output_images),
-        "source": "google_custom_search_live",
+        "source": source_name,
         "images": output_images
     }
 
